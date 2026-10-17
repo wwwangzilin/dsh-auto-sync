@@ -133,6 +133,81 @@ check('command registration returns a disposer', typeof disposer === 'function')
 disposer?.();
 check('disposer unregisters', disposed === true);
 
+// --- locale handling ------------------------------------------------------
+const i18n = await import(`file:///${REPO.replace(/\\/g, '/')}/lib/i18n.mjs`);
+
+check('explicit locale zh wins', i18n.resolveLocale({ locale: 'zh' }) === 'zh');
+check('zh-CN normalizes to zh', i18n.resolveLocale({ locale: 'zh-CN' }) === 'zh');
+check('en-US normalizes to en', i18n.resolveLocale({ locale: 'en-US' }) === 'en');
+check('host locale is used when config is silent', i18n.resolveLocale({}, 'zh') === 'zh');
+check('unknown host locale falls back to en', i18n.resolveLocale({}, 'fr') === 'en');
+check('no signal at all defaults to en', i18n.resolveLocale({}) === 'en');
+
+process.env.DSH_AUTO_SYNC_LOCALE = 'zh';
+check('environment locale is honored', i18n.resolveLocale({}) === 'zh');
+check('explicit locale beats environment', i18n.resolveLocale({ locale: 'en' }) === 'en');
+delete process.env.DSH_AUTO_SYNC_LOCALE;
+
+const zhHandler = onboard.createCommandHandler({
+  home: HOME,
+  locale: 'zh',
+  onSetup: async () => {},
+  onSnapshot: () => {},
+});
+const zhStatus = await zhHandler({ rawInput: '' });
+check('zh status renders in Chinese', zhStatus.text.includes('状态') && zhStatus.text.includes('远端仓库'), zhStatus.text.split('\n')[0]);
+const zhHelp = await zhHandler({ rawInput: 'nonsense' });
+check('zh help renders in Chinese', zhHelp.text.includes('未知子命令'), zhHelp.text.split('\n')[0]);
+const zhDoctor = await zhHandler({ rawInput: 'doctor' });
+check('zh doctor renders in Chinese', zhDoctor.text.includes('诊断'), zhDoctor.text.split('\n')[0]);
+const zhLines = await zhHandler({ rawInput: 'lines' });
+check('zh lines renders in Chinese', zhLines.text.includes('备份线'), zhLines.text.split('\n')[0]);
+// Onboarding guidance is checked against an unconfigured home so the message
+// is actually produced; the configured `HOME` above correctly returns null.
+const FRESH_MSG = 'D:/tmp/sync-oobe/message';
+if (existsSync(FRESH_MSG)) rmSync(FRESH_MSG, { recursive: true, force: true });
+mkdirSync(join(FRESH_MSG, 'sync-plugin'), { recursive: true });
+writeFileSync(join(FRESH_MSG, 'sync-plugin', 'config.json'), JSON.stringify({ remote: '', locale: 'zh' }, null, 2));
+
+// Slash commands appear in messages that reference them, and the verb itself
+// stays ASCII in every language.
+const unconfiguredZh = onboard.createCommandHandler({
+  home: FRESH_MSG,
+  locale: 'zh',
+  onSetup: async () => {},
+  onSnapshot: () => {},
+});
+const zhRun = await unconfiguredZh({ rawInput: 'run' });
+check(
+  'zh error keeps command syntax ASCII',
+  zhRun.text.includes('/dsh-sync setup') && zhRun.text.includes('请先配置'),
+  zhRun.text,
+);
+
+// Onboarding guidance is checked against an unconfigured home so the message
+// is actually produced; the configured `HOME` above correctly returns null.
+const zhMessage = await onboard.onboardingMessage(configMod.loadConfig({ home: FRESH_MSG }));
+check('zh onboarding message is Chinese', zhMessage !== null && zhMessage.includes('已安装'), String(zhMessage).slice(0, 80));
+
+writeFileSync(join(FRESH_MSG, 'sync-plugin', 'config.json'), JSON.stringify({ remote: '', locale: 'en' }, null, 2));
+const enMessage = await onboard.onboardingMessage(configMod.loadConfig({ home: FRESH_MSG }));
+check('en onboarding message is English', enMessage !== null && enMessage.includes('installed'), String(enMessage).slice(0, 80));
+
+// Both dictionaries must expose the same keys and callable arities, or one
+// locale silently breaks. Array lengths legitimately differ: wrapping differs
+// per language, so an array is compared by type only.
+function shape(value, path = '') {
+  if (typeof value === 'function') return [`${path}:fn/${value.length}`];
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return Object.keys(value).sort().flatMap((k) => shape(value[k], `${path}.${k}`));
+  }
+  if (Array.isArray(value)) return [`${path}:array`];
+  return [`${path}:string`];
+}
+const enShape = shape(i18n.DICTIONARIES.en).join('|');
+const zhShape = shape(i18n.DICTIONARIES.zh).join('|');
+check('zh and en dictionaries have identical shape', enShape === zhShape, enShape === zhShape ? '' : `${enShape}\nvs\n${zhShape}`);
+
 const failed = results.filter((r) => !r.ok).length;
 console.log(`\n${results.length - failed}/${results.length} checks passed`);
 process.exit(failed === 0 ? 0 : 1);

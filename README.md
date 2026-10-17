@@ -1,151 +1,130 @@
 # dsh-auto-sync
 
-> Automatic, versioned backup of your DeepSeek Harness home — to **your own**
-> private git repository.
+[English](README.en.md) | 中文
 
-`dsh-auto-sync` is a DeepSeek Harness plugin that keeps everything DSH writes
-under its home directory under version control. Conversations, memory files,
-settings, installed plugins and their dependency trees are committed and pushed
-to a remote you control, so a lost laptop, a corrupted profile or a failed
-upgrade is recoverable in minutes.
+> 把 DeepSeek Harness 的 home 目录自动、带版本地备份到**你自己的**私有 git 仓库。
 
-The plugin ships no credentials and no default destination. It never talks to a
-server operated by this project; the only remote it knows about is the one you
-configure.
+`dsh-auto-sync` 是一个 DeepSeek Harness 插件。它把 DSH 写在 home 目录下的所有内容纳入版本控制：对话记录、记忆文件、设置、已安装插件及其依赖树，全部提交并推送到你掌控的远端。换电脑、配置损坏、升级翻车，都能在几分钟内恢复。
+
+插件不携带任何凭据，也没有默认目标。它不会连接本项目运营的任何服务器；它唯一认识的远端，就是你配置的那个。
 
 ---
 
-## Table of contents
+## 目录
 
-- [Why this exists](#why-this-exists)
-- [How it works](#how-it-works)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [First run](#first-run)
-- [The `/dsh-sync` command](#the-dsh-sync-command)
-- [Configuration](#configuration)
-- [Backup lines](#backup-lines)
-- [Restoring](#restoring)
-- [Security model](#security-model)
-- [Operational behaviour](#operational-behaviour)
-- [Troubleshooting](#troubleshooting)
-- [Development](#development)
-- [License](#license)
+- [为什么需要它](#为什么需要它)
+- [工作原理](#工作原理)
+- [环境要求](#环境要求)
+- [安装](#安装)
+- [首次运行](#首次运行)
+- [`/dsh-sync` 命令](#dsh-sync-命令)
+- [配置](#配置)
+- [备份线](#备份线)
+- [恢复](#恢复)
+- [安全模型](#安全模型)
+- [运行行为](#运行行为)
+- [排错](#排错)
+- [开发](#开发)
+- [许可](#许可)
 
 ---
 
-## Why this exists
+## 为什么需要它
 
-DeepSeek Harness keeps state in several places that are easy to lose and
-awkward to reconstruct:
+DeepSeek Harness 的状态散落在好几处，丢了很难重建：
 
-| State | Typical location | Why it matters |
+| 状态 | 典型位置 | 为什么重要 |
 | --- | --- | --- |
-| Session logs | `<home>/sessions/**` | The full history of every conversation |
-| Memory files | `<home>/memories/**`, `<home>/memory/**` | Accumulated context and project knowledge |
-| Credentials and settings | `<home>/settings.yaml`, `<home>/.credentials.yaml` | Providers, models, preferences |
-| Profile plugins | `<home>/profiles/<name>/` | Installed bundles, lockfiles, local patches |
-| Project work | any directory you choose | Source code you were working on |
+| 会话记录 | `<home>/sessions/**` | 每一次对话的完整历史 |
+| 记忆文件 | `<home>/memories/**`、`<home>/memory/**` | 长期积累的上下文与项目知识 |
+| 凭据与设置 | `<home>/settings.yaml`、`<home>/.credentials.yaml` | 服务商、模型、偏好 |
+| Profile 插件 | `<home>/profiles/<name>/` | 已安装的组合包、lockfile、本地补丁 |
+| 项目工作 | 你指定的任意目录 | 当时正在写的代码 |
 
-Most of this is machine-local and undocumented, and the plugin trees are
-expensive to rebuild by hand. `dsh-auto-sync` treats the home as a working tree
-and turns it into a durable, restorable artifact.
+这些内容大多只存在于本机、没有文档，而插件树手工重建代价很高。`dsh-auto-sync` 把 home 当作一个工作树，把它变成可持久化、可恢复的产物。
 
-Two properties are deliberate:
+有两个特性是刻意设计的：
 
-1. **Storage stays under your control.** The destination is an ordinary git
-   remote: a private GitHub or GitLab repository, an internal review server, or
-   a bare repository on a NAS.
-2. **Failures are visible.** A backup tool that stops working silently is worse
-   than no backup tool. Every run records its outcome, and a stale line is
-   reported in the DSH log.
+1. **存储始终由你掌控。** 目标是一个普通 git 远端：私有 GitHub / GitLab 仓库、内网服务器，或 NAS 上的裸仓库。
+2. **失败一定可见。** 悄悄停止工作的备份工具比没有备份更糟。每次运行都会记录结果，备份线过期会在 DSH 日志里报告。
 
 ---
 
-## How it works
+## 工作原理
 
-The plugin registers with the profile's bundle layer and runs inside the host
-process. It schedules work; it does not perform git operations inline. Small,
-frequent state is committed in-process, while full snapshots run detached so a
-shutdown does not truncate them.
+插件通过 profile 的 bundle 层注册，运行在宿主进程中。它只负责调度，不在内联路径上执行 git 操作：小而频繁的状态在进程内提交，完整快照则以分离进程运行，这样关闭应用不会把快照截断。
 
 ```
                     ┌──────────────────────────────┐
-   turn/end ───────▶│  hot line  (in-process)      │──▶ branch  dsh-hot
-   interval ───────▶│  copy → commit → push        │
+   turn/end ───────▶│  热备份线（进程内）           │──▶ 分支  dsh-hot
+   定时 ───────────▶│  复制 → 提交 → 推送           │
                     └──────────────────────────────┘
 
                     ┌──────────────────────────────┐
-   interval ───────▶│  cold-sync.mjs  (detached)   │──▶ branch  dsh-snapshot
-   shutdown ───────▶│  mirror → commit → push      │
+   定时 ───────────▶│  cold-sync.mjs（分离进程）    │──▶ 分支  dsh-snapshot
+   关闭 ───────────▶│  镜像 → 提交 → 推送           │
                     └──────────────────────────────┘
                                   │
                                   └───────────────▶ workspace-sync.mjs
-                                                     branch  dsh-workspace
+                                                    分支  dsh-workspace
 ```
 
-Each line owns a branch and a **separate git worktree**, so no two lines ever
-compete for one index — the failure mode that produces
-`index.lock: File exists` under concurrent backups. A detached shutdown snapshot
-therefore cannot collide with a hot commit.
+每条线独占一个分支和一份**独立的 git 工作区副本**，因此任意两条线都不会争用同一个 index——那正是并发备份时产生 `index.lock: File exists` 的根本原因。也正因如此，关闭时触发的快照不可能和热备份提交撞车。
 
-Configuration is read from two layers, with a defined precedence:
+配置分两层读取，优先级明确：
 
-1. the Cordis entry's `config` in the profile patch — convenient for pinning
-   values per profile;
-2. `<home>/sync-plugin/config.json` — the long-lived copy a person edits;
-3. built-in defaults.
+1. profile 补丁里 Cordis 条目的 `config`——适合按 profile 固定某些值；
+2. `<home>/sync-plugin/config.json`——人手动编辑的长期副本；
+3. 内置默认值。
 
-The file layer wins over the patch layer for any key it states, because the
-plugin manager rewrites profile patches while the config file is authored by
-hand.
+对于文件层声明了的所有键，文件层优先于补丁层。原因是插件管理器会重写 profile 补丁，而配置文件由人手写。
 
 ---
 
-## Requirements
+## 环境要求
 
-| Component | Version | Notes |
+| 组件 | 版本 | 说明 |
 | --- | --- | --- |
-| DeepSeek Harness | `>= 0.2.0-rc.2` | Declared as an optional peer; newer releases are not blocked |
-| Node.js | `^22.19 \|\| >= 24` | Already present in a DSH installation |
-| git | 2.30+ | Must be on `PATH`; probed at startup |
+| DeepSeek Harness | `>= 0.2.0-rc.2` | 声明为可选 peer，不会拦住更新的版本 |
+| Node.js | `^22.19 \|\| >= 24` | DSH 安装中已自带 |
+| git | 2.30+ | 必须在 `PATH` 中，启动时会探测 |
 
-The plugin is cross-platform. It has no platform-specific dependencies: the
-directory mirroring, locking and process handling are implemented with Node's
-own modules rather than shell utilities.
+插件跨平台。它不依赖任何平台特有工具：目录镜像、加锁、进程管理都用 Node 自带模块实现，而不是调用 shell 工具。
 
 ---
 
-## Installation
+## 安装
 
-### From the desktop application
+### 从桌面应用安装
 
-1. Open **Plugins** in the sidebar.
-2. Choose **Add plugin** and enter the absolute path of this directory.
-3. Enable the `dsh-auto-sync` bundle.
-4. Restart DeepSeek Harness.
+1. 在侧栏打开**插件**。
+2. 选择**添加插件**，填入本目录的绝对路径。
+3. 启用 `dsh-auto-sync` 组合包。
+4. 重启 DeepSeek Harness。
 
-### From the CLI
+### 从命令行安装
 
 ```sh
-dsh plugin --profile desktop add link:/absolute/path/to/dsh-auto-sync
+dsh plugin --profile desktop add link:/本目录的绝对路径/dsh-auto-sync
 ```
 
-### First run
+---
 
-On the first start with no configuration present, the plugin writes a
-documented template to `<home>/sync-plugin/config.json` and logs a warning
-explaining that backups are paused until `remote` is set.
+## 首次运行
 
-You can finish setup either through the slash command or by editing the file.
+首次启动且没有任何配置时，插件会把一份带说明的模板写到
+`<home>/sync-plugin/config.json`，并记录一条警告，说明在你设置 `remote`
+之前备份处于暂停状态。
 
-**Through the command** — no restart needed:
+完成配置有两种方式：
+
+**用命令**——无需重启：
 
 ```text
 /dsh-sync setup git@github.com:you/dsh-backup.git
 ```
 
-**By hand** — fill in the remote and restart:
+**手动编辑**——填写远端后重启：
 
 ```json
 {
@@ -153,47 +132,58 @@ You can finish setup either through the slash command or by editing the file.
 }
 ```
 
-On the next start the plugin initialises the repository, creates one branch and
-worktree per enabled line, and begins backing up.
-
-### The `/dsh-sync` command
-
-Available whenever the profile provides the `commands` service (the Web and
-desktop profiles do; headless and ACP profiles do not).
-
-| Command | Effect |
-| --- | --- |
-| `/dsh-sync` | Report the remote, the lines, and the last success per line |
-| `/dsh-sync setup [url]` | Set the remote and run the first-run setup |
-| `/dsh-sync remote <url>` | Change the remote only, leaving branches alone |
-| `/dsh-sync lines` | List the backup lines and their branches |
-| `/dsh-sync workspace <path>` | Enable the workspace line for a project directory |
-| `/dsh-sync workspace off` | Disable the workspace line |
-| `/dsh-sync run` | Schedule a snapshot immediately |
-| `/dsh-sync doctor` | Diagnose git, the repository, the branches and the worktrees |
-
-Every change made through the command is written to the config file, so the
-result is visible and diffable rather than implied by UI state.
+下次启动时，插件会初始化仓库、为每条启用的备份线创建分支和工作区副本，然后开始备份。
 
 ---
 
-## Configuration
+## `/dsh-sync` 命令
 
-The configuration file lives at `<home>/sync-plugin/config.json`.
+只要 profile 提供 `commands` 服务就有这个命令（Web 与桌面 profile 有，headless 与 ACP profile 没有）。
 
-### Top-level keys
+| 命令 | 效果 |
+| --- | --- |
+| `/dsh-sync` | 报告远端、各备份线，以及各自上次成功时间 |
+| `/dsh-sync setup [地址]` | 设置远端并执行首次初始化 |
+| `/dsh-sync remote <地址>` | 只修改远端，不动分支 |
+| `/dsh-sync lines` | 列出备份线及其分支 |
+| `/dsh-sync workspace <路径>` | 启用项目线，指定要备份的项目目录 |
+| `/dsh-sync workspace off` | 关闭项目线 |
+| `/dsh-sync run` | 立刻安排一次快照 |
+| `/dsh-sync doctor` | 诊断 git、仓库、分支与工作区副本 |
 
-| Key | Type | Default | Description |
+通过命令做的每一次修改都会写回配置文件，因此结果是可见、可 diff 的，而不是只存在于界面状态里。
+
+### 界面语言
+
+命令输出与首次引导支持中文和英文，按以下顺序决定：
+
+1. 配置里的 `locale`（`zh` 或 `en`）；
+2. 环境变量 `DSH_AUTO_SYNC_LOCALE`；
+3. DSH 自身的界面语言（宿主提供时）；
+4. 默认 `en`。
+
+日志信息始终是英文，这样贴到 issue 里的报错谁都能读。
+
+---
+
+## 配置
+
+配置文件位于 `<home>/sync-plugin/config.json`。
+
+### 顶层键
+
+| 键 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `remote` | `string` | `""` | URL of the backup remote. **Required.** SSH and HTTPS are both accepted. |
-| `remoteName` | `string` | `"origin"` | Remote name used when `origin` already points at a different repository. |
-| `worktree` | `string` | `<home>-backup` | Parent directory for the per-line checkouts. Must be **outside** the home. |
-| `exclude` | `string[]` | see below | Additional ignore patterns appended to the home's `.gitignore`. |
-| `userName` | `string` | `"dsh-auto-sync"` | Commit author, used only when git has no identity configured. |
-| `userEmail` | `string` | `"dsh-auto-sync@localhost"` | Commit email, same condition. |
-| `home` | `string` | `$DSH_HOME` or `~/.dsh` | Overrides the home directory. An explicit `--home` wins over the environment variable. |
+| `remote` | `string` | `""` | 备份远端地址。**必填。** SSH 与 HTTPS 均可。 |
+| `remoteName` | `string` | `"origin"` | 当 `origin` 已指向其他仓库时使用的远端名。 |
+| `worktree` | `string` | `<home>-backup` | 各备份线工作区副本的父目录。必须**位于 home 之外**。 |
+| `locale` | `string` | `"zh"` | 命令与引导文案语言：`zh` 或 `en`。 |
+| `exclude` | `string[]` | 见下文 | 追加到 home `.gitignore` 的额外忽略规则。 |
+| `userName` | `string` | `"dsh-auto-sync"` | 提交者名称，仅在 git 没有配置身份时使用。 |
+| `userEmail` | `string` | `"dsh-auto-sync@localhost"` | 提交者邮箱，同上。 |
+| `home` | `string` | `$DSH_HOME` 或 `~/.dsh` | 覆盖 home 目录。显式 `--home` 优先于环境变量。 |
 
-Default exclusions:
+默认忽略规则：
 
 ```text
 .credentials.yaml
@@ -206,41 +196,42 @@ memory/memory.db-shm
 memory/memory.db-wal
 ```
 
-### Backup line keys
+### 备份线键
 
-Each line accepts `enabled` and `branch`, plus the keys below.
+每条线都接受 `enabled` 和 `branch`，此外还有：
 
 **`lines.hot`**
 
-| Key | Default | Description |
+| 键 | 默认值 | 说明 |
 | --- | --- | --- |
-| `paths` | `[".sync-status.json"]` | Files, relative to the home, committed after each turn. Paths resolving outside the home are refused. |
-| `debounceMs` | `30000` | Quiet period after the last completed turn. |
-| `intervalMs` | `900000` | Unconditional refresh, so a long tool run still commits. |
+| `paths` | `[".sync-status.json"]` | 每轮对话后提交的文件，相对 home。解析到 home 之外的路径会被拒绝。 |
+| `debounceMs` | `30000` | 最后一个对话轮结束后的静默期。 |
+| `intervalMs` | `900000` | 无条件刷新间隔，让长时间运行的工具调用也能落盘。 |
 
 **`lines.snapshot`**
 
-| Key | Default | Description |
+| 键 | 默认值 | 说明 |
 | --- | --- | --- |
-| `intervalMs` | `86400000` | Full snapshot interval. |
-| `profile` | `"desktop"` | Profile whose dependency tree is included. |
-| `includeNodeModules` | `true` | Re-include the profile's `node_modules` in the snapshot despite the home-level exclusion. |
-| `files` | manifest list | Profile files mirrored alongside the dependency tree. |
+| `intervalMs` | `86400000` | 完整快照间隔。 |
+| `profile` | `"desktop"` | 纳入哪份 profile 的依赖树。 |
+| `includeNodeModules` | `true` | 尽管 home 层排除了 `node_modules`，仍在快照中重新纳入该 profile 的依赖。 |
+| `files` | 清单文件列表 | 与依赖树一同镜像的 profile 文件。 |
 
 **`lines.workspace`**
 
-| Key | Default | Description |
+| 键 | 默认值 | 说明 |
 | --- | --- | --- |
-| `enabled` | `false` | The line stays idle until a `source` is named. |
-| `source` | `""` | Absolute path of the project directory to mirror. |
-| `exclude` | `[".git", "node_modules", "dist", "build", "target", ".cache"]` | Directory and file names skipped anywhere in the tree. Replaces the defaults entirely when set. |
+| `enabled` | `false` | 在指定 `source` 之前，这条线保持空闲。 |
+| `source` | `""` | 要镜像的项目目录的绝对路径。 |
+| `exclude` | `[".git", "node_modules", "dist", "build", "target", ".cache"]` | 递归时按名称跳过的目录/文件。一旦设置便完全取代默认值。 |
 
-### Example
+### 示例
 
 ```json
 {
   "remote": "git@github.com:you/dsh-backup.git",
   "worktree": "/home/you/.dsh-backup",
+  "locale": "zh",
   "lines": {
     "hot": {
       "intervalMs": 900000,
@@ -262,114 +253,85 @@ Each line accepts `enabled` and `branch`, plus the keys below.
 
 ---
 
-## Backup lines
+## 备份线
 
 ### `hot` → `dsh-hot`
 
-Small, frequently changing state. Files are copied into the line's worktree,
-committed and pushed. Default cadence is 30 seconds after a turn ends, with a
-15-minute floor so state still lands during a long-running tool sequence.
+小而频繁变化的状态。文件被复制进该线的工作区副本，提交并推送。默认节奏是对话轮结束后 30 秒，并有 15 分钟下限，保证长时间的工具序列期间状态也能落盘。
 
 ### `snapshot` → `dsh-snapshot`
 
-A full mirror of the home, plus the configured profile's dependency manifest
-and installed dependency tree. This is the line that makes a machine
-recoverable. `link:` dependencies are recorded by their manifest entry and
-restored by a package manager after a clone; published dependencies are
-vendored into the branch.
+home 的完整镜像，外加所配置 profile 的依赖清单与已安装依赖树。这条线才是让一台机器可恢复的关键。`link:` 依赖按清单条目记录，克隆后用包管理器恢复；已发布的依赖则直接固化进分支。
 
-Runs daily, on shutdown, and once shortly after startup when the previous
-snapshot is older than the interval — a restart loop would otherwise reset the
-countdown and never reach the line.
+每日运行一次、关闭时运行一次，并在启动后发现上次快照早于间隔时补跑一次——否则反复重启会把倒计时一直重置，永远到不了这条线。
 
 ### `workspace` → `dsh-workspace`
 
-Mirrors one project directory so that the code being worked on is versioned
-alongside the state that describes it. Disabled by default. Build output and
-dependency caches are excluded; the exclusion list is configurable.
+镜像一个项目目录，让正在写的代码和描述它的状态一起被版本化。默认关闭。构建产物与依赖缓存会被排除；排除列表可配置。
 
 ---
 
-## Restoring
+## 恢复
 
-Restore an entire home:
+恢复整个 home：
 
 ```sh
-git clone <your-remote> ~/.dsh
+git clone <你的远端> ~/.dsh
 cd ~/.dsh
 git checkout dsh-snapshot
 dsh plugin --profile desktop install
 ```
 
-Restore a single file:
+恢复单个文件：
 
 ```sh
 git show dsh-snapshot:sessions/2026-01-01/....jsonl > restored.jsonl
 ```
 
-Restore a project:
+恢复项目：
 
 ```sh
-git clone --branch dsh-workspace <your-remote> project
+git clone --branch dsh-workspace <你的远端> project
 ```
 
-`git log dsh-snapshot -- <path>` yields the revision history of any individual
-file, which makes the backup usable as a recovery mechanism rather than only as
-a disaster copy.
+`git log dsh-snapshot -- <路径>` 能给出任意单个文件的修订历史，这让备份不仅能当灾备，也能当恢复工具用。
 
 ---
 
-## Security model
+## 安全模型
 
-**Secrets are excluded by default.** The plugin adds `.credentials.yaml` and
-the other patterns listed above to the home's `.gitignore` on first run.
-`.credentials.yaml` holds provider API keys; it must never be pushed.
+**默认排除密钥。** 首次运行时，插件会把 `.credentials.yaml` 及上文列出的其他规则写进 home 的 `.gitignore`。`.credentials.yaml` 保存服务商 API Key，绝不能推送上去。
 
-**Existing repositories are adopted, not taken over.** If the home is already a
-git repository with a remote, its history and remote configuration are left
-untouched. The plugin adds branches and worktrees only. It never rewrites,
-rebases or force-pushes existing history, and it never changes a remote that
-already points somewhere.
+**已有仓库是接管，不是覆盖。** 如果 home 已经是带远端的 git 仓库，它的历史和远端配置都会原样保留。插件只添加分支和工作区副本。它从不重写、变基或强推已有历史，也从不改动已指向别处的远端。
 
-**Nothing is force-pushed.** A rejected push is retried once after integrating
-the remote tip, with the local snapshot winning conflicts. History is append-only
-from the plugin's perspective.
+**从不强推。** 推送被拒绝时会先合并远端顶端再重试一次，冲突以本地快照为准。从插件视角看，历史只增不改。
 
-**Configuration cannot exfiltrate files.** `lines.hot.paths` are resolved
-against the home and refused when they escape it, so a malformed config cannot
-turn a backup line into a file copier.
+**配置无法外泄文件。** `lines.hot.paths` 会相对 home 解析，超出 home 即拒绝，所以一份写错的配置无法把备份线变成任意文件复制器。
 
-**The plugin fails open for the session.** No error is thrown into the session
-event chain. A failing backup is logged and recorded and the conversation
-continues; the failure surfaces through the status file and the log rather than
-through a broken chat.
+**插件对会话是失败开放。** 任何错误都不会抛进会话事件链。备份失败会被记录并上报，对话照常进行；失败通过状态文件和日志暴露，而不是通过中断聊天。
 
 ---
 
-## Operational behaviour
+## 运行行为
 
-### Concurrency
+### 并发
 
-Every line owns an independent worktree and index. The snapshot script takes a
-lock file, so overlapping triggers (timer, startup catch-up, shutdown) serialise
-instead of corrupting an in-flight commit. A lock older than one hour is treated
-as abandoned.
+每条线独占工作区副本与 index。快照脚本会获取锁文件，因此重叠触发（定时器、启动补跑、关闭钩子）会串行执行，而不是破坏进行中的提交。超过一小时的锁视为已废弃。
 
-### Failure handling
+### 失败处理
 
-| Condition | Behaviour |
+| 情况 | 行为 |
 | --- | --- |
-| `git` missing | Startup check reports it; backups are paused |
-| `remote` unset | Template written; backups paused with an explicit warning |
-| Push to primary remote rejected | One retry after merging the remote tip; nothing force-pushed |
-| Worktree missing | Reported; recreate by restarting DSH |
-| Worktree holds a different branch | Refused rather than adopted, so two branches never share one snapshot |
-| Commit identity missing | Falls back to the configured `userName` / `userEmail` |
+| `git` 缺失 | 启动检查报告；备份暂停 |
+| `remote` 未设置 | 写入模板；备份暂停并明确告警 |
+| 推送被拒绝 | 合并远端顶端后重试一次；从不强推 |
+| 工作区副本缺失 | 报告；重启 DSH 即可重建 |
+| 工作区副本检出的是别的分支 | 拒绝接管，避免两个分支共用一份快照 |
+| 提交身份缺失 | 回退到配置的 `userName` / `userEmail` |
 
-### Observability
+### 可观测性
 
-`<home>/sync-plugin/status.json` records, per line, the timestamp of the last
-success and the message of the last error:
+`<home>/sync-plugin/status.json` 按线记录上次成功时间与最后一次错误信息：
 
 ```json
 {
@@ -383,62 +345,59 @@ success and the message of the last error:
 }
 ```
 
-A line that has not succeeded for 48 hours is reported in the DSH log at startup.
+超过 48 小时未成功的备份线会在启动时报告到 DSH 日志。
 
 ---
 
-## Troubleshooting
+## 排错
 
-**Backups paused: `remote` is empty.**
-Set `remote` in `<home>/sync-plugin/config.json` and restart DSH.
+**备份暂停：`remote` 为空。**
+在 `<home>/sync-plugin/config.json` 里设置 `remote`，或运行 `/dsh-sync setup <地址>`。
 
-**Push fails with `could not read Username`.**
-The plugin runs without a terminal, so git cannot prompt. Configure an SSH key
-without a passphrase, or a credential helper that already holds a token.
+**推送失败并提示 `could not read Username`。**
+插件在没有终端的环境下运行，git 无法弹出提示。请配置无口令的 SSH key，或让 credential helper 已保存 token。
 
-**`index.lock: File exists`.**
-Result of a concurrent run against one index, which this plugin avoids by
-design. If it appears, a previous DSH process did not exit cleanly: remove the
-stale lock under the worktree's `.git` directory.
+**出现 `index.lock: File exists`。**
+这是同一 index 上并发运行的结果，本插件在设计上已经避免。如果出现，说明上一个 DSH 进程没有正常退出：删除对应工作区副本 `.git` 目录下的陈旧锁文件即可。
 
-**Snapshot line never runs.**
-Verify `lines.snapshot.enabled` and check `status.json`. A missing `git` on
-`PATH` is the most common cause, and is reported at startup.
+**快照线从不运行。**
+确认 `lines.snapshot.enabled`，并查看 `status.json`。最常见的原因是 `PATH` 里没有 `git`，启动时会报告。
 
-**Worktree refused because it holds another branch.**
-The plugin will not adopt a directory checked out on a different branch. Point
-`worktree` elsewhere or remove the stale directory.
+**工作区副本因检出其他分支被拒绝。**
+插件不会接管检出了别的分支的目录。把 `worktree` 指向别处，或删除该陈旧目录。
+
+**中文命令输出没有生效。**
+检查配置里的 `locale` 是否为 `"zh"`，或设置环境变量 `DSH_AUTO_SYNC_LOCALE=zh`。
 
 ---
 
-## Development
+## 开发
 
-The repository is dependency-free. Tests build throwaway repositories under the
-system temporary directory and assert the resulting remote contents, including
-negative cases: secrets, logs and build output must never appear on any branch.
+仓库本身没有任何运行时依赖。测试会在系统临时目录下建立一次性仓库，并对最终推送到远端的内容做断言，包括反向用例：密钥、日志、构建产物绝不能出现在任何分支上。
 
 ```sh
-node tests/e2e.mjs           # full flow: setup, hot commit, snapshot, push
-node tests/verify-remote.mjs # assertions over what landed on the remote
-node tests/edge.mjs          # workspace line, adoption, unconfigured start, path escape
-node tests/onboard.mjs       # remote validation, onboarding message, /dsh-sync command
+node tests/e2e.mjs           # 完整流程：初始化、热提交、快照、推送
+node tests/verify-remote.mjs # 对远端实际内容做断言
+node tests/edge.mjs          # 项目线、接管已有仓库、未配置启动、路径逃逸
+node tests/onboard.mjs       # 远端校验、引导消息、/dsh-sync 命令、中英文一致性
 ```
 
-| Path | Responsibility |
+| 路径 | 职责 |
 | --- | --- |
-| `index.js` | Plugin entry: scheduling, hot line, lifecycle |
-| `cold-sync.mjs` | Detached snapshot line |
-| `workspace-sync.mjs` | Project mirror line |
-| `lib/config.mjs` | Defaults, layering, first-run template |
-| `lib/setup.mjs` | Repository initialisation, adoption, ignore rules, worktrees |
-| `lib/onboard.mjs` | First-run guidance and the `/dsh-sync` command |
-| `lib/git.mjs` | Git facade |
-| `lib/copy.mjs` | Cross-platform directory mirroring |
-| `lib/status.mjs` | Status reporting |
-| `lib/exec.mjs` | Process helpers |
+| `index.js` | 插件入口：调度、热备份线、生命周期 |
+| `cold-sync.mjs` | 分离进程中的快照线 |
+| `workspace-sync.mjs` | 项目镜像线 |
+| `lib/config.mjs` | 默认值、分层、首次运行模板 |
+| `lib/setup.mjs` | 仓库初始化、接管、忽略规则、工作区副本 |
+| `lib/onboard.mjs` | 首次引导与 `/dsh-sync` 命令 |
+| `lib/i18n.mjs` | 中英双语文案 |
+| `lib/git.mjs` | git 封装 |
+| `lib/copy.mjs` | 跨平台目录镜像 |
+| `lib/status.mjs` | 状态上报 |
+| `lib/exec.mjs` | 进程辅助 |
 
 ---
 
-## License
+## 许可
 
-MIT. See [LICENSE](LICENSE).
+MIT，见 [LICENSE](LICENSE)。

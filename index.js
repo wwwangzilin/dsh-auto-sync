@@ -24,11 +24,11 @@ import { copyFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig, writeConfigFile, configTemplate, STATE_DIR } from './lib/config.mjs';
+import { loadConfig, writeConfigFile, configTemplate, hostLocale, STATE_DIR } from './lib/config.mjs';
 import { Git, probeGit } from './lib/git.mjs';
 import { setup } from './lib/setup.mjs';
 import { noteFailure, noteSuccess, readStatus, staleLines } from './lib/status.mjs';
-import { COMMAND_NAME, registerCommand } from './lib/onboard.mjs';
+import { COMMAND_NAME, onboardingMessage, registerCommand } from './lib/onboard.mjs';
 
 /** Absolute directory of this plugin. */
 const THIS_DIR = fileURLToPath(new URL('.', import.meta.url));
@@ -206,6 +206,15 @@ export function apply(ctx, entryConfig = {}) {
       warn(
         `"remote" is empty in ${config.configPath}; backups are paused. Run /${COMMAND_NAME} setup <your-private-repo-url>, or edit that file and restart DSH.`,
       );
+      // The log line above is for whoever reads the log; this is for whoever is
+      // looking at the conversation. It appears once per unfinished start and
+      // disappears for good once the remote is set.
+      try {
+        const guidance = await onboardingMessage(loadConfig({ ...entryConfig, home }), hostLocale(ctx));
+        if (guidance !== null) info(guidance);
+      } catch (error) {
+        warn(`could not render the onboarding guidance: ${error?.message ?? error}`);
+      }
       return;
     }
 
@@ -268,6 +277,8 @@ export function apply(ctx, entryConfig = {}) {
   try {
     const commandDisposer = registerCommand(ctx, {
       home,
+      locale: config.locale,
+      hostLocale: () => hostLocale(ctx),
       onSetup: async (updated) => {
         await runSetup(updated);
       },
