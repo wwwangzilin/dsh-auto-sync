@@ -96,6 +96,27 @@ check('style tag is tagged for bookkeeping', styleTags[0]?.dataset?.pluginCss ==
 // Assert the guard exists in source rather than relying on the double.
 check('style injection is guarded by a querySelector check', /querySelector\('style\[data-plugin-css/.test(source));
 
+// --- render with no payload ------------------------------------------------
+// Regression: a failed status request leaves `data` null while `loaded` is
+// true. The render must not dereference the payload; an earlier version read
+// `data.remote` there and threw "Cannot read properties of null".
+check('client guards a null payload before rendering', /data === null/.test(source));
+check(
+  'client validates the status payload before storing it',
+  /result\.ok && result\.data && typeof result\.data === 'object'/.test(source),
+);
+
+const Tab = registered[0].component;
+let firstError = null;
+let firstTree = null;
+try {
+  firstTree = Tab();
+} catch (error) {
+  firstError = error;
+}
+check('first render with no payload does not throw', firstError === null, firstError ? String(firstError) : '');
+check('first render produces a tree', firstTree !== null && typeof firstTree === 'object');
+
 const failed = results.filter((r) => !r.ok).length;
 console.log(`\n${results.length - failed}/${results.length} checks passed`);
 process.exit(failed === 0 ? 0 : 1);
