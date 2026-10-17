@@ -26,6 +26,7 @@ configure.
 - [First run](#first-run)
 - [The `/dsh-sync` command](#the-dsh-sync-command)
 - [Interface language](#interface-language)
+- [Settings page](#settings-page)
 - [Configuration](#configuration)
 - [Backup lines](#backup-lines)
 - [Restoring](#restoring)
@@ -190,6 +191,48 @@ resolved in this order:
 
 Log messages stay in English so a report pasted into an issue is readable by
 anyone.
+
+---
+
+## Settings page
+
+In the desktop and Web profiles, **Settings → Plugins** gains an **Automatic
+backup** tab. It reads and writes the same config file as the slash command:
+
+- edit the remote repository URL (saving it for a first-time install runs the
+  setup immediately, with no restart)
+- see each backup line's branch, enabled state, last success and last error
+- name a project directory to back up too; clearing it disables the line
+- run a snapshot on demand
+
+It is split in two halves:
+
+| Half | File | Responsibility |
+| --- | --- | --- |
+| Host | `lib/api.mjs` | Registers three same-origin routes on `webServer` |
+| Client | `lib/client.js` | Browser script registering a `settings.plugins.tab` tab |
+
+The client half is a **plain browser script** loaded through
+`window.__ModuleLoader__.load`, using the React the host already provides —
+**there is no build step**; edit it and reload.
+
+### Routes
+
+| Route | Method | Effect |
+| --- | --- | --- |
+| `/api/dsh-auto-sync/status` | GET | Config, per-line status, git availability |
+| `/api/dsh-auto-sync/config` | POST | Validate and persist the remote, locale, intervals, workspace |
+| `/api/dsh-auto-sync/snapshot` | POST | Schedule a snapshot now (409 when no remote is set) |
+
+Only the fields the page owns are accepted; every other key in the file is
+preserved, so hand-written content survives a round trip through the UI.
+
+**Cross-origin fence:** mutating requests must carry an `Origin` that matches
+`Host`, otherwise they are refused with 403. Another site cannot drive backups
+through the user's browser.
+
+A profile without a `webServer` (headless, CLI) registers no routes, so there is
+no page to serve; the plugin itself is unaffected.
 
 ---
 
@@ -439,6 +482,8 @@ node tests/e2e.mjs           # full flow: setup, hot commit, snapshot, push
 node tests/verify-remote.mjs # assertions over what landed on the remote
 node tests/edge.mjs          # workspace line, adoption, unconfigured start, path escape
 node tests/onboard.mjs       # remote validation, onboarding message, /dsh-sync command
+node tests/api.mjs           # settings routes: validation, persistence, origin fence
+node tests/client.mjs        # client script: module factory, slot registration
 ```
 
 | Path | Responsibility |
@@ -450,6 +495,8 @@ node tests/onboard.mjs       # remote validation, onboarding message, /dsh-sync 
 | `lib/setup.mjs` | Repository initialisation, adoption, ignore rules, worktrees |
 | `lib/onboard.mjs` | First-run guidance and the `/dsh-sync` command |
 | `lib/i18n.mjs` | Chinese and English user-facing text |
+| `lib/api.mjs` | Settings-page Host routes |
+| `lib/client.js` | Settings-page browser half |
 | `lib/git.mjs` | Git facade |
 | `lib/copy.mjs` | Cross-platform directory mirroring |
 | `lib/status.mjs` | Status reporting |

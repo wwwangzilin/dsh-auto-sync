@@ -29,6 +29,7 @@ import { Git, probeGit } from './lib/git.mjs';
 import { setup } from './lib/setup.mjs';
 import { noteFailure, noteSuccess, readStatus, staleLines } from './lib/status.mjs';
 import { COMMAND_NAME, onboardingMessage, registerCommand } from './lib/onboard.mjs';
+import { API_PREFIX, registerRoutes } from './lib/api.mjs';
 
 /** Absolute directory of this plugin. */
 const THIS_DIR = fileURLToPath(new URL('.', import.meta.url));
@@ -294,6 +295,40 @@ export function apply(ctx, entryConfig = {}) {
     }
   } catch (error) {
     warn(`could not register /${COMMAND_NAME}: ${error?.message ?? error}`);
+  }
+
+  // --- settings page API ----------------------------------------------------
+  // The settings tab is a browser script; it reaches the host only through
+  // these routes. A profile without a web server (headless, CLI) has no page to
+  // serve, so the routes are simply not registered.
+  try {
+    const webServer = ctx.webServer;
+    const disposers = registerRoutes(webServer, {
+      home,
+      locale: config.locale,
+      hostLocale: () => hostLocale(ctx),
+      warn,
+      onSetup: async () => {
+        await runSetup(loadConfig({ ...entryConfig, home }));
+      },
+      onSnapshot: () => {
+        runSnapshotScript();
+      },
+    });
+    if (disposers.length > 0) {
+      info(`serving ${disposers.length} settings page route(s) under ${API_PREFIX}`);
+      ctx.on('dispose', () => {
+        for (const dispose of disposers) {
+          try {
+            dispose();
+          } catch {
+            // A route already torn down by the host is not an error.
+          }
+        }
+      });
+    }
+  } catch (error) {
+    warn(`could not register the settings page routes: ${error?.message ?? error}`);
   }
 
   void startup().catch((error) => warn(`startup check failed: ${error?.message ?? error}`));

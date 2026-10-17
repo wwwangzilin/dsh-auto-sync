@@ -18,6 +18,7 @@
 - [安装](#安装)
 - [首次运行](#首次运行)
 - [`/dsh-sync` 命令](#dsh-sync-命令)
+- [设置页](#设置页)
 - [配置](#配置)
 - [备份线](#备份线)
 - [恢复](#恢复)
@@ -163,6 +164,40 @@ dsh plugin --profile desktop add link:/本目录的绝对路径/dsh-auto-sync
 4. 默认 `en`。
 
 日志信息始终是英文，这样贴到 issue 里的报错谁都能读。
+
+---
+
+## 设置页
+
+在桌面版或 Web 版里，`设置 → 插件` 会多出一个**自动备份**页签，和斜杠命令读写同一份配置文件：
+
+- 填写或修改远端仓库地址（保存后，首次配置会立刻执行初始化，不用重启）
+- 查看三条备份线的分支、启用状态、上次成功时间与最后一次错误
+- 指定要同时备份的项目目录，清空即关闭项目线
+- 一键手动快照
+
+实现上分两半：
+
+| 半边 | 文件 | 职责 |
+| --- | --- | --- |
+| Host | `lib/api.mjs` | 在 `webServer` 上注册三个同名路由，校验并落盘 |
+| Client | `lib/client.js` | 浏览器脚本，注册 `settings.plugins.tab` 页签 |
+
+客户端是**手写的普通浏览器脚本**，通过 `window.__ModuleLoader__.load` 加载，直接使用宿主提供的 React——**不需要任何构建步骤**，改完刷新即可看到效果。
+
+### 接口
+
+| 路由 | 方法 | 作用 |
+| --- | --- | --- |
+| `/api/dsh-auto-sync/status` | GET | 返回配置、三条线状态、git 可用性 |
+| `/api/dsh-auto-sync/config` | POST | 校验并保存远端、语言、备份线间隔、项目目录 |
+| `/api/dsh-auto-sync/snapshot` | POST | 立刻安排一次快照（未配置远端时返回 409） |
+
+接口只接受页面会用到的字段，其余键原样保留，因此手写在配置文件里的自定义内容不会被界面弄丢。
+
+**跨站防护**：写操作要求 `Origin` 头与 `Host` 同源，不一致直接 403。这样别的网站无法借用户浏览器触发备份写入。
+
+没有 `webServer` 的 profile（headless、CLI）不会注册这些路由，页面自然也不存在——插件本身照常工作。
 
 ---
 
@@ -380,6 +415,8 @@ node tests/e2e.mjs           # 完整流程：初始化、热提交、快照、�
 node tests/verify-remote.mjs # 对远端实际内容做断言
 node tests/edge.mjs          # 项目线、接管已有仓库、未配置启动、路径逃逸
 node tests/onboard.mjs       # 远端校验、引导消息、/dsh-sync 命令、中英文一致性
+node tests/api.mjs           # 设置页接口：校验、写盘、跨站拦截、幂等注册
+node tests/client.mjs        # 客户端脚本：模块工厂、slot 注册、样式注入
 ```
 
 | 路径 | 职责 |
@@ -391,6 +428,8 @@ node tests/onboard.mjs       # 远端校验、引导消息、/dsh-sync 命令、
 | `lib/setup.mjs` | 仓库初始化、接管、忽略规则、工作区副本 |
 | `lib/onboard.mjs` | 首次引导与 `/dsh-sync` 命令 |
 | `lib/i18n.mjs` | 中英双语文案 |
+| `lib/api.mjs` | 设置页的 Host 端路由 |
+| `lib/client.js` | 设置页的浏览器端 |
 | `lib/git.mjs` | git 封装 |
 | `lib/copy.mjs` | 跨平台目录镜像 |
 | `lib/status.mjs` | 状态上报 |
