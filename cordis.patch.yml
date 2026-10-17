@@ -1,0 +1,20 @@
+# Bundle patch for dsh-auto-sync: inserts the host plugin into the profile.
+# Must use an `insert` list — a bare id-targeted entry would fail with
+# `entry not found` because bundle patches apply over an empty entry list.
+#
+# Every setting is optional at the patch layer: the plugin falls back to a
+# config file under the DSH home and then to safe defaults, so installing it
+# never gates the profile on configuration. Override here only to pin values
+# per profile, for example:
+#
+#   - insert:
+#       - id: dsh-auto-sync
+#         name: dsh-auto-sync
+#         config:
+#           remote: git@github.com:you/dsh-backup.git
+#           lines:
+#             cold:
+#               syncMs: 43200000
+- insert:
+    - id: dsh-auto-sync
+      name: dsh-auto-sync
