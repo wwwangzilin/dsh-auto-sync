@@ -83,11 +83,33 @@ const ctx = {
 };
 
 factoryResult.apply(ctx);
+// The page registers in two places: the top-level settings navigation (what a
+// person actually sees) and the plugins section's child tab.
+check(
+  'client injects into the settings section slot',
+  slotCalls.includes('inject:settings.section'),
+  slotCalls.join(','),
+);
 check('client injects into the settings tab slot', slotCalls.includes('inject:settings.plugins.tab'), slotCalls.join(','));
-check('client registers exactly one tab', registered.length === 1, String(registered.length));
-check('tab is named after the plugin', registered[0]?.definition?.id === 'dsh-auto-sync', registered[0]?.definition?.id);
-check('tab has a label function', typeof registered[0]?.definition?.label === 'function');
-check('tab renders a component function', typeof registered[0]?.component === 'function');
+check('client registers one entry per slot', registered.length === 2, String(registered.length));
+check(
+  'every registration names the plugin',
+  registered.every((r) => r.definition?.id === 'dsh-auto-sync'),
+  registered.map((r) => r.definition?.id).join(','),
+);
+check(
+  'the section registration is first (top-level nav)',
+  registered[0]?.definition?.name === 'settings.section',
+  registered[0]?.definition?.name,
+);
+check(
+  'every registration has a label function',
+  registered.every((r) => typeof r.definition?.label === 'function'),
+);
+check(
+  'every registration renders a component function',
+  registered.every((r) => typeof r.component === 'function'),
+);
 check('a style tag was injected once', styleTags.length === 1, String(styleTags.length));
 check('style tag is tagged for bookkeeping', styleTags[0]?.dataset?.pluginCss === 'dsh-auto-sync/settings.css');
 

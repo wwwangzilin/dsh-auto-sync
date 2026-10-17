@@ -183,10 +183,26 @@ export function apply(ctx, entryConfig = {}) {
           return;
         }
       }
-      const push = await git.exec(['push', remoteName, lines.hot.branch]);
+      // Push, and on a rejection integrate the remote tip once and retry —
+      // the same contract the snapshot line follows. A backup branch is never
+      // force-pushed, so a divergent remote is merged with local content
+      // winning rather than overwritten.
+      const branch = lines.hot.branch;
+      let push = await git.exec(['push', remoteName, branch]);
       if (push.code !== 0) {
-        fail(`push failed (the commit stays local): ${(push.err || push.out).trim()}`);
-        return;
+        const first = (push.err || push.out || 'push failed').trim();
+        await git.exec(['fetch', remoteName, branch]);
+        const merge = await git.exec(['merge', `${remoteName}/${branch}`, '--no-edit', '-X', 'ours']);
+        if (merge.code !== 0) {
+          await git.exec(['merge', '--abort']);
+          fail(`push rejected and the retry merge failed: ${first}`);
+          return;
+        }
+        push = await git.exec(['push', remoteName, branch]);
+        if (push.code !== 0) {
+          fail(`push failed (the commit stays local): ${(push.err || push.out).trim()}`);
+          return;
+        }
       }
       noteSuccess(home, 'hot');
     } catch (error) {
