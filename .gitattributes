@@ -1,0 +1,3 @@
+# Keep line endings stable for everyone: source files are always LF.
+* text=auto eol=lf
+*.cmd text eol=crlf
