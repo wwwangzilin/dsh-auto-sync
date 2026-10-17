@@ -348,6 +348,61 @@ Mirrors one project directory so that the code being worked on is versioned
 alongside the state that describes it. Disabled by default. Build output and
 dependency caches are excluded; the exclusion list is configurable.
 
+### `release` → GitHub Release asset
+
+**The other form of full backup**: the whole home packed into a `tar.gz` and
+published as a release asset.
+
+Why both full-backup lines exist:
+
+| | `snapshot` (branch) | `release` (asset) |
+| --- | --- | --- |
+| Storage | every version lands in git history | one archive per version |
+| Cost | tens of thousands of files, every commit | one compressed file |
+| Restore | `git checkout` | download and extract, no plugin needed |
+| Keeping many | history grows forever | keep N, prune the rest |
+
+Use `snapshot` for the everyday increment and `release` for long-term archives
+and disaster recovery.
+
+Measured on a 3.4 GB home (dependencies excluded): about **369 MiB**, one file.
+
+```json
+"release": {
+  "enabled": true,
+  "repo": "",
+  "tagPrefix": "dsh-backup-",
+  "keep": 5,
+  "intervalMs": 604800000,
+  "includeNodeModules": false,
+  "includeSecrets": false,
+  "partSizeBytes": 1500000000
+}
+```
+
+- An empty `repo` is derived from the git remote as `owner/name`.
+- Anything above `partSizeBytes` is split into `.part000`, `.part001`, … with a
+  `manifest.json` carrying each part's sha256.
+- `keep` bounds retention; older tags (which embed the timestamp) are deleted
+  first, and **only tags with this line's prefix are ever considered**.
+- `.credentials.yaml` is excluded. `includeSecrets: true` packs it in — on a
+  public repository that is a key leak, not a backup.
+
+Try it without uploading anything first:
+
+```sh
+node release-backup.mjs --dry-run
+```
+
+It reports the archive size, the part count and the destination repository.
+
+**Transport**: the GitHub CLI when present, the REST API with a token otherwise.
+That order is deliberate — behind a TLS-intercepting proxy (corporate proxy, an
+accelerator that rewrites `hosts`) Node's `fetch` fails with
+`UNABLE_TO_VERIFY_LEAF_SIGNATURE`, while `gh` uses its own trust chain and works.
+On the REST path the token comes from `DSH_AUTO_SYNC_GITHUB_TOKEN`,
+`GITHUB_TOKEN`, or `gh auth token`.
+
 ---
 
 ## Restoring

@@ -304,6 +304,51 @@ home 的完整镜像，外加所配置 profile 的依赖清单与已安装依赖
 
 镜像一个项目目录，让正在写的代码和描述它的状态一起被版本化。默认关闭。构建产物与依赖缓存会被排除；排除列表可配置。
 
+### `release` → GitHub Release 附件
+
+**全量备份的另一种形态**：把整个 home 打成 tar.gz，作为 release 附件发布。
+
+为什么要两种全量备份并存：
+
+| | `snapshot`（分支） | `release`（附件） |
+| --- | --- | --- |
+| 存储 | 每个版本都算进 git 历史 | 每个版本一个独立归档 |
+| 体积代价 | 上万文件 × 每次提交 | 一份压缩包 |
+| 恢复 | `git checkout` | 下载解压，无需本插件 |
+| 保留多份 | 历史无限增长 | 保留 N 份，自动清理 |
+
+所以：**日常增量用 `snapshot`，长期归档与灾难恢复用 `release`。**
+
+实测一份 3.4 GB 的 home（不含依赖）压出来约 **369 MiB**，单文件即可上传。
+
+```json
+"release": {
+  "enabled": true,
+  "repo": "",
+  "tagPrefix": "dsh-backup-",
+  "keep": 5,
+  "intervalMs": 604800000,
+  "includeNodeModules": false,
+  "includeSecrets": false,
+  "partSizeBytes": 1500000000
+}
+```
+
+- `repo` 留空则从 git 远端自动推导 `owner/name`，不必重复填。
+- 超过 `partSizeBytes` 自动分卷为 `.part000`、`.part001`…，并附带带 sha256 的 `manifest.json`。
+- `keep` 控制保留几份，超出的按标签名（含时间戳）从旧到新删除；**只删本线自己创建的标签前缀**。
+- `.credentials.yaml` 默认排除。`includeSecrets: true` 会把它打进附件——公开仓库下等于泄露密钥，慎用。
+
+首次使用先试跑，不产生任何上传：
+
+```sh
+node release-backup.mjs --dry-run
+```
+
+它会告诉你归档多大、分几卷、将发到哪个仓库。
+
+**传输方式**：优先使用 `gh`（GitHub CLI），没有 `gh` 时回退到 REST API + token。这一点不是随便选的——在装了 TLS 中间人的机器上（企业代理、改写 hosts 的加速器），Node 的 `fetch` 会以 `UNABLE_TO_VERIFY_LEAF_SIGNATURE` 失败，而 `gh` 用自己的信任链正常工作。REST 路径下 token 取自 `DSH_AUTO_SYNC_GITHUB_TOKEN`、`GITHUB_TOKEN`，或 `gh auth token`。
+
 ---
 
 ## 恢复
@@ -417,6 +462,10 @@ node tests/edge.mjs          # 项目线、接管已有仓库、未配置启动�
 node tests/onboard.mjs       # 远端校验、引导消息、/dsh-sync 命令、中英文一致性
 node tests/api.mjs           # 设置页接口：校验、写盘、跨站拦截、幂等注册
 node tests/client.mjs        # 客户端脚本：模块工厂、slot 注册、样式注入
+node tests/registration.mjs  # Cordis inject 契约：服务声明与缺失服务时的挂载
+node tests/archive.mjs       # 归档与分卷：排除密钥、依赖开关、分卷重组、清单
+node tests/release-api.mjs   # 发布接口：仓库解析、标签、幂等创建、清理顺序
+node tests/release-gh.mjs    # GitHub CLI 传输：命令行、失败信息、REST 回退
 ```
 
 | 路径 | 职责 |
@@ -424,12 +473,15 @@ node tests/client.mjs        # 客户端脚本：模块工厂、slot 注册、�
 | `index.js` | 插件入口：调度、热备份线、生命周期 |
 | `cold-sync.mjs` | 分离进程中的快照线 |
 | `workspace-sync.mjs` | 项目镜像线 |
+| `release-backup.mjs` | 发布包线：打包、分卷、上传、清理 |
 | `lib/config.mjs` | 默认值、分层、首次运行模板 |
 | `lib/setup.mjs` | 仓库初始化、接管、忽略规则、工作区副本 |
 | `lib/onboard.mjs` | 首次引导与 `/dsh-sync` 命令 |
 | `lib/i18n.mjs` | 中英双语文案 |
 | `lib/api.mjs` | 设置页的 Host 端路由 |
 | `lib/client.js` | 设置页的浏览器端 |
+| `lib/archive.mjs` | 归档与分卷 |
+| `lib/release.mjs` | 发布：gh 与 REST 两种传输 |
 | `lib/git.mjs` | git 封装 |
 | `lib/copy.mjs` | 跨平台目录镜像 |
 | `lib/status.mjs` | 状态上报 |

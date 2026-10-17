@@ -101,7 +101,7 @@ export function apply(ctx, entryConfig = {}) {
     }
   };
 
-  const timers = { debounce: null, flush: null, snapshot: null, catchUp: null };
+  const timers = { debounce: null, flush: null, snapshot: null, release: null, catchUp: null };
   let disposed = false;
 
   /**
@@ -122,6 +122,28 @@ export function apply(ctx, entryConfig = {}) {
       info('snapshot scheduled');
     } catch (error) {
       warn(`could not start the snapshot: ${error.message}`);
+    }
+  };
+
+  /**
+   * Run the release script detached.
+   *
+   * Packaging a multi-gigabyte home takes minutes, so it must never run on the
+   * event loop that serves the conversation. `--dry-run` is deliberately not
+   * used here: the scheduled line is meant to publish.
+   */
+  const runReleaseScript = () => {
+    if (!lines.release.enabled) return;
+    try {
+      const child = spawn(
+        process.execPath,
+        [join(THIS_DIR, 'release-backup.mjs'), '--home', home],
+        { detached: true, stdio: 'ignore', windowsHide: true },
+      );
+      child.unref();
+      info('release backup scheduled');
+    } catch (error) {
+      warn(`could not start the release backup: ${error.message}`);
     }
   };
 
@@ -291,6 +313,7 @@ export function apply(ctx, entryConfig = {}) {
       ...(target.lines.hot.enabled ? ['hot'] : []),
       ...(target.lines.snapshot.enabled ? ['snapshot'] : []),
       ...(target.lines.workspace.enabled ? ['workspace'] : []),
+      ...(target.lines.release.enabled ? ['release'] : []),
     ];
     const stale = staleLines(target.home, enabled);
     if (stale.length > 0) {
@@ -313,6 +336,9 @@ export function apply(ctx, entryConfig = {}) {
       },
       onSnapshot: () => {
         runSnapshotScript();
+      },
+      onRelease: () => {
+        runReleaseScript();
       },
     });
     if (commandDisposer !== undefined) {
@@ -349,6 +375,9 @@ export function apply(ctx, entryConfig = {}) {
       onSnapshot: () => {
         runSnapshotScript();
       },
+      onRelease: () => {
+        runReleaseScript();
+      },
     });
     if (disposers.length > 0) {
       info(`serving ${disposers.length} settings page route(s) under ${API_PREFIX}`);
@@ -384,6 +413,15 @@ export function apply(ctx, entryConfig = {}) {
     timers.snapshot = setInterval(() => {
       runSnapshotScript();
     }, lines.snapshot.intervalMs);
+  }
+
+  // The release line is intentionally NOT run on shutdown: packaging gigabytes
+  // on exit would keep the machine busy after the window closes. It runs on its
+  // own interval and on demand.
+  if (lines.release.enabled) {
+    timers.release = setInterval(() => {
+      runReleaseScript();
+    }, lines.release.intervalMs);
   }
 
   ctx.on('dispose', () => {

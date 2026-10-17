@@ -100,7 +100,7 @@ const deps = {
 };
 const disposers = api.registerRoutes(webServer, deps);
 
-check('three routes registered', routes.size === 3, [...routes.keys()].join(', '));
+check('every route registered', routes.size === 4, [...routes.keys()].join(', '));
 check('status route registered', routes.has(`${api.API_PREFIX}/status`));
 check('config route registered', routes.has(`${api.API_PREFIX}/config`));
 check('snapshot route registered', routes.has(`${api.API_PREFIX}/snapshot`));
@@ -201,7 +201,7 @@ check('no webServer means no routes', api.registerRoutes(undefined, deps).length
 check('no webServer means no crash', api.registerRoutes({}, deps).length === 0);
 
 for (const dispose of disposers) dispose();
-check('disposers unregister every route', disposals === 3 && routes.size === 0, `${disposals}`);
+check('disposers unregister every route', disposals === 4 && routes.size === 0, `${disposals}`);
 
 const failed = results.filter((r) => !r.ok).length;
 console.log(`\n${results.length - failed}/${results.length} checks passed`);
