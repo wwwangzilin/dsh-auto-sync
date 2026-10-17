@@ -40,8 +40,20 @@ const CATCH_UP_DELAY_MS = 60_000;
 /** Cordis plugin name, used in loader diagnostics. */
 export const name = 'dsh-auto-sync';
 
-/** No services are required; listeners mount immediately. */
-export const inject = [];
+/**
+ * Services this plugin reads from its context.
+ *
+ * Cordis refuses a property access for a service that is not listed here
+ * (`cannot get property "commands" without inject`), so both optional surfaces
+ * must be declared before they are probed. Declaring them does not require
+ * them to exist: `required: false` keeps the plugin mounting on a headless or
+ * CLI profile that provides neither, and the surfaces are still probed at use
+ * so a missing service is skipped rather than fatal.
+ */
+export const inject = {
+  commands: { required: false },
+  webServer: { required: false },
+};
 
 /**
  * Whether `child` is `parent` or inside it.
@@ -302,7 +314,14 @@ export function apply(ctx, entryConfig = {}) {
   // these routes. A profile without a web server (headless, CLI) has no page to
   // serve, so the routes are simply not registered.
   try {
-    const webServer = ctx.webServer;
+    // The service is declared in `inject`, so this read is permitted; it still
+    // has to tolerate a profile that never provides a web server.
+    let webServer;
+    try {
+      webServer = ctx.webServer;
+    } catch {
+      webServer = undefined;
+    }
     const disposers = registerRoutes(webServer, {
       home,
       locale: config.locale,
