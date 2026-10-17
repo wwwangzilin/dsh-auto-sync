@@ -28,6 +28,7 @@ import { loadConfig, writeConfigFile, configTemplate, STATE_DIR } from './lib/co
 import { Git, probeGit } from './lib/git.mjs';
 import { setup } from './lib/setup.mjs';
 import { noteFailure, noteSuccess, readStatus, staleLines } from './lib/status.mjs';
+import { COMMAND_NAME, registerCommand } from './lib/onboard.mjs';
 
 /** Absolute directory of this plugin. */
 const THIS_DIR = fileURLToPath(new URL('.', import.meta.url));
@@ -203,7 +204,7 @@ export function apply(ctx, entryConfig = {}) {
 
     if (!configured) {
       warn(
-        `"remote" is empty in ${config.configPath}; backups are paused. Set it to your private repository URL and restart DSH.`,
+        `"remote" is empty in ${config.configPath}; backups are paused. Run /${COMMAND_NAME} setup <your-private-repo-url>, or edit that file and restart DSH.`,
       );
       return;
     }
@@ -214,46 +215,78 @@ export function apply(ctx, entryConfig = {}) {
       return;
     }
 
-    try {
-      const result = await setup(config, warn);
-      if (!result.ok) {
-        warn(result.error ?? 'setup failed; backups are paused');
-        return;
-      }
-      if (result.actions.length > 0) info(`setup: ${result.actions.join('; ')}`);
-    } catch (error) {
-      warn(`setup failed: ${error?.message ?? error}`);
-      return;
+    await runSetup(loadConfig({ ...entryConfig, home }), info);
+  };
+
+  /**
+   * Run the repository setup and the post-setup catch-up.
+   * Shared by startup and the `/dsh-sync setup` command so a person never has
+   * to restart DSH to finish configuring.
+   *
+   * @param {import('./lib/config.mjs').SyncConfig} target - the config to apply.
+   * @param {(message: string) => void} [notify] - sink for progress messages.
+   */
+  const runSetup = async (target, notify = info) => {
+    const result = await setup(target, warn);
+    if (!result.ok) {
+      throw new Error(result.error ?? 'setup failed; backups are paused');
     }
+    if (result.actions.length > 0) notify(`setup: ${result.actions.join('; ')}`);
 
     // Catch up a stale snapshot shortly after startup instead of waiting a full
     // interval that every restart would reset.
-    const status = readStatus(home);
+    const status = readStatus(target.home);
     const last = status.snapshot?.lastSuccessAt ? Date.parse(status.snapshot.lastSuccessAt) : Number.NaN;
     const ageMs = Number.isNaN(last) ? Number.POSITIVE_INFINITY : Date.now() - last;
-    if (lines.snapshot.enabled && ageMs >= lines.snapshot.intervalMs) {
+    if (target.lines.snapshot.enabled && ageMs >= target.lines.snapshot.intervalMs) {
       const ageText = Number.isFinite(ageMs) ? `${Math.round(ageMs / 3_600_000)}h old` : 'never recorded';
-      info(`the last snapshot is stale (${ageText}); catching up shortly`);
-      timers.catchUp = setTimeout(() => {
-        timers.catchUp = null;
-        void syncHot().finally(runSnapshotScript);
-      }, CATCH_UP_DELAY_MS);
+      notify(`the last snapshot is stale (${ageText}); catching up shortly`);
+      if (timers.catchUp === null) {
+        timers.catchUp = setTimeout(() => {
+          timers.catchUp = null;
+          void syncHot().finally(runSnapshotScript);
+        }, CATCH_UP_DELAY_MS);
+      }
     }
 
     const enabled = [
-      ...(lines.hot.enabled ? ['hot'] : []),
-      ...(lines.snapshot.enabled ? ['snapshot'] : []),
-      ...(lines.workspace.enabled ? ['workspace'] : []),
+      ...(target.lines.hot.enabled ? ['hot'] : []),
+      ...(target.lines.snapshot.enabled ? ['snapshot'] : []),
+      ...(target.lines.workspace.enabled ? ['workspace'] : []),
     ];
-    const stale = staleLines(home, enabled);
+    const stale = staleLines(target.home, enabled);
     if (stale.length > 0) {
-      warn(`stale backup line(s): ${stale.join(', ')}; see ${join(home, STATE_DIR, 'status.json')}`);
+      warn(`stale backup line(s): ${stale.join(', ')}; see ${join(target.home, STATE_DIR, 'status.json')}`);
     } else {
-      info(`ready: backing up ${home} via ${remoteName}`);
+      notify(`ready: backing up ${target.home} via ${target.remoteName}`);
     }
   };
 
+  // --- command surface ------------------------------------------------------
+  // A profile without the `commands` service (headless, ACP) simply has no
+  // slash commands; the config file remains the only surface there.
+  try {
+    const commandDisposer = registerCommand(ctx, {
+      home,
+      onSetup: async (updated) => {
+        await runSetup(updated);
+      },
+      onSnapshot: () => {
+        runSnapshotScript();
+      },
+    });
+    if (commandDisposer !== undefined) {
+      info(`registered /${COMMAND_NAME}; run it to configure or inspect backups`);
+      ctx.on('dispose', () => {
+        commandDisposer();
+      });
+    }
+  } catch (error) {
+    warn(`could not register /${COMMAND_NAME}: ${error?.message ?? error}`);
+  }
+
   void startup().catch((error) => warn(`startup check failed: ${error?.message ?? error}`));
+
 
   // --- event wiring ---------------------------------------------------------
   ctx.on('session/event', (_session, event) => {

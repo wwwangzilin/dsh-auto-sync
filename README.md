@@ -21,6 +21,8 @@ configure.
 - [How it works](#how-it-works)
 - [Requirements](#requirements)
 - [Installation](#installation)
+- [First run](#first-run)
+- [The `/dsh-sync` command](#the-dsh-sync-command)
 - [Configuration](#configuration)
 - [Backup lines](#backup-lines)
 - [Restoring](#restoring)
@@ -131,13 +133,19 @@ dsh plugin --profile desktop add link:/absolute/path/to/dsh-auto-sync
 
 ### First run
 
-On the first start with no configuration present, the plugin:
+On the first start with no configuration present, the plugin writes a
+documented template to `<home>/sync-plugin/config.json` and logs a warning
+explaining that backups are paused until `remote` is set.
 
-1. writes a documented template to `<home>/sync-plugin/config.json`;
-2. logs a warning explaining that backups are paused until `remote` is set;
-3. does **not** create a repository.
+You can finish setup either through the slash command or by editing the file.
 
-Fill in the remote and restart:
+**Through the command** — no restart needed:
+
+```text
+/dsh-sync setup git@github.com:you/dsh-backup.git
+```
+
+**By hand** — fill in the remote and restart:
 
 ```json
 {
@@ -145,9 +153,27 @@ Fill in the remote and restart:
 }
 ```
 
-That is the entire required configuration. On the next start the plugin
-initialises the repository, creates one branch and worktree per enabled line,
-and begins backing up.
+On the next start the plugin initialises the repository, creates one branch and
+worktree per enabled line, and begins backing up.
+
+### The `/dsh-sync` command
+
+Available whenever the profile provides the `commands` service (the Web and
+desktop profiles do; headless and ACP profiles do not).
+
+| Command | Effect |
+| --- | --- |
+| `/dsh-sync` | Report the remote, the lines, and the last success per line |
+| `/dsh-sync setup [url]` | Set the remote and run the first-run setup |
+| `/dsh-sync remote <url>` | Change the remote only, leaving branches alone |
+| `/dsh-sync lines` | List the backup lines and their branches |
+| `/dsh-sync workspace <path>` | Enable the workspace line for a project directory |
+| `/dsh-sync workspace off` | Disable the workspace line |
+| `/dsh-sync run` | Schedule a snapshot immediately |
+| `/dsh-sync doctor` | Diagnose git, the repository, the branches and the worktrees |
+
+Every change made through the command is written to the config file, so the
+result is visible and diffable rather than implied by UI state.
 
 ---
 
@@ -395,6 +421,7 @@ negative cases: secrets, logs and build output must never appear on any branch.
 node tests/e2e.mjs           # full flow: setup, hot commit, snapshot, push
 node tests/verify-remote.mjs # assertions over what landed on the remote
 node tests/edge.mjs          # workspace line, adoption, unconfigured start, path escape
+node tests/onboard.mjs       # remote validation, onboarding message, /dsh-sync command
 ```
 
 | Path | Responsibility |
@@ -404,6 +431,7 @@ node tests/edge.mjs          # workspace line, adoption, unconfigured start, pat
 | `workspace-sync.mjs` | Project mirror line |
 | `lib/config.mjs` | Defaults, layering, first-run template |
 | `lib/setup.mjs` | Repository initialisation, adoption, ignore rules, worktrees |
+| `lib/onboard.mjs` | First-run guidance and the `/dsh-sync` command |
 | `lib/git.mjs` | Git facade |
 | `lib/copy.mjs` | Cross-platform directory mirroring |
 | `lib/status.mjs` | Status reporting |
