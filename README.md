@@ -2,17 +2,16 @@
 
 [English](README.en.md) | 中文
 
-> 把 DeepSeek Harness 的 home 目录自动、带版本地备份到**你自己的**私有 git 仓库。
+DeepSeek Harness 插件，将 DSH home 目录自动纳入版本控制并推送到用户自有的 git 远端。
 
-`dsh-auto-sync` 是一个 DeepSeek Harness 插件。它把 DSH 写在 home 目录下的所有内容纳入版本控制：对话记录、记忆文件、设置、已安装插件及其依赖树，全部提交并推送到你掌控的远端。换电脑、配置损坏、升级翻车，都能在几分钟内恢复。
-
-插件不携带任何凭据，也没有默认目标。它不会连接本项目运营的任何服务器；它唯一认识的远端，就是你配置的那个。
+插件把 DSH 写入 home 的内容作为工作树管理：会话记录、记忆文件、设置、profile 插件及其依赖树，另可镜像指定的项目目录。目标远端由用户指定；插件不连接本项目运营的任何服务器，也不携带任何凭据。
 
 ---
 
 ## 目录
 
-- [为什么需要它](#为什么需要它)
+- [备份范围](#备份范围)
+- [设计约束](#设计约束)
 - [工作原理](#工作原理)
 - [环境要求](#环境要求)
 - [安装](#安装)
@@ -30,35 +29,33 @@
 
 ---
 
-## 为什么需要它
+## 备份范围
 
-DeepSeek Harness 的状态散落在好几处，丢了很难重建：
+| 状态 | 典型位置 |
+| --- | --- |
+| 会话记录 | `<home>/sessions/**` |
+| 记忆文件 | `<home>/memories/**`、`<home>/memory/**` |
+| 配置 | `<home>/settings.yaml` |
+| Profile 插件 | `<home>/profiles/<name>/` |
+| 项目工作 | 用户指定的目录（可选） |
 
-| 状态 | 典型位置 | 为什么重要 |
-| --- | --- | --- |
-| 会话记录 | `<home>/sessions/**` | 每一次对话的完整历史 |
-| 记忆文件 | `<home>/memories/**`、`<home>/memory/**` | 长期积累的上下文与项目知识 |
-| 凭据与设置 | `<home>/settings.yaml`、`<home>/.credentials.yaml` | 服务商、模型、偏好 |
-| Profile 插件 | `<home>/profiles/<name>/` | 已安装的组合包、lockfile、本地补丁 |
-| 项目工作 | 你指定的任意目录 | 当时正在写的代码 |
+凭据文件 `<home>/.credentials.yaml` 默认被排除，见[安全模型](#安全模型)。
 
-这些内容大多只存在于本机、没有文档，而插件树手工重建代价很高。`dsh-auto-sync` 把 home 当作一个工作树，把它变成可持久化、可恢复的产物。
+## 设计约束
 
-有两个特性是刻意设计的：
-
-1. **存储始终由你掌控。** 目标是一个普通 git 远端：私有 GitHub / GitLab 仓库、内网服务器，或 NAS 上的裸仓库。
-2. **失败一定可见。** 悄悄停止工作的备份工具比没有备份更糟。每次运行都会记录结果，备份线过期会在 DSH 日志里报告。
+1. **存储位置由用户控制。** 远端为普通 git 仓库：私有 GitHub 或 GitLab 仓库、内网服务器、NAS 上的裸仓库。
+2. **失败必须可见。** 停止工作却没有提示的备份工具比没有备份更糟。每次运行的结果都会记录；备份线超过 48 小时未成功会在 DSH 日志中报告。
 
 ---
 
 ## 工作原理
 
-插件通过 profile 的 bundle 层注册，运行在宿主进程中。它只负责调度，不在内联路径上执行 git 操作：小而频繁的状态在进程内提交，完整快照则以分离进程运行，这样关闭应用不会把快照截断。
+插件经 profile 的 bundle 层注册，运行在宿主进程中。它只负责调度：热备份线在进程内完成小规模提交，完整快照以分离进程运行，避免应用退出截断快照。
 
-```
+```text
                     ┌──────────────────────────────┐
    turn/end ───────▶│  热备份线（进程内）           │──▶ 分支  dsh-hot
-   定时 ───────────▶│  复制 → 提交 → 推送           │
+    定时 ───────────▶│  复制 → 提交 → 推送           │
                     └──────────────────────────────┘
 
                     ┌──────────────────────────────┐
@@ -70,15 +67,15 @@ DeepSeek Harness 的状态散落在好几处，丢了很难重建：
                                                     分支  dsh-workspace
 ```
 
-每条线独占一个分支和一份**独立的 git 工作区副本**，因此任意两条线都不会争用同一个 index——那正是并发备份时产生 `index.lock: File exists` 的根本原因。也正因如此，关闭时触发的快照不可能和热备份提交撞车。
+每条备份线独占一个分支和一份独立的 git 工作区副本，因此任意两条线不会争用同一个 index——这是并发备份产生 `index.lock: File exists` 的原因。退出时的快照不会与热备份提交冲突。
 
-配置分两层读取，优先级明确：
+配置按以下优先级读取：
 
-1. profile 补丁里 Cordis 条目的 `config`——适合按 profile 固定某些值；
-2. `<home>/sync-plugin/config.json`——人手动编辑的长期副本；
+1. profile 补丁中 Cordis 条目的 `config`；
+2. `<home>/sync-plugin/config.json`；
 3. 内置默认值。
 
-对于文件层声明了的所有键，文件层优先于补丁层。原因是插件管理器会重写 profile 补丁，而配置文件由人手写。
+配置文件已声明的键优先于补丁层：插件管理器会重写 profile 补丁，而配置文件由用户维护。
 
 ---
 
@@ -86,11 +83,11 @@ DeepSeek Harness 的状态散落在好几处，丢了很难重建：
 
 | 组件 | 版本 | 说明 |
 | --- | --- | --- |
-| DeepSeek Harness | `>= 0.2.0-rc.2` | 声明为可选 peer，不会拦住更新的版本 |
-| Node.js | `^22.19 \|\| >= 24` | DSH 安装中已自带 |
-| git | 2.30+ | 必须在 `PATH` 中，启动时会探测 |
+| DeepSeek Harness | `>= 0.2.0-rc.2` | 声明为可选 peer，不阻止更高版本 |
+| Node.js | `^22.19 \|\| >= 24` | 随 DSH 安装提供 |
+| git | 2.30+ | 须在 `PATH` 中，启动时探测 |
 
-插件跨平台。它不依赖任何平台特有工具：目录镜像、加锁、进程管理都用 Node 自带模块实现，而不是调用 shell 工具。
+目录镜像、加锁与进程管理均由 Node 内置模块实现，不调用平台特化工具。
 
 ---
 
@@ -98,7 +95,7 @@ DeepSeek Harness 的状态散落在好几处，丢了很难重建：
 
 ### 从桌面应用安装
 
-1. 在侧栏打开**插件**。
+1. 在侧栏打开**插件**页。
 2. 选择**添加插件**，填入本目录的绝对路径。
 3. 启用 `dsh-auto-sync` 组合包。
 4. 重启 DeepSeek Harness。
@@ -106,26 +103,24 @@ DeepSeek Harness 的状态散落在好几处，丢了很难重建：
 ### 从命令行安装
 
 ```sh
-dsh plugin --profile desktop add link:/本目录的绝对路径/dsh-auto-sync
+dsh plugin --profile desktop add link:/path/to/dsh-auto-sync
 ```
 
 ---
 
 ## 首次运行
 
-首次启动且没有任何配置时，插件会把一份带说明的模板写到
-`<home>/sync-plugin/config.json`，并记录一条警告，说明在你设置 `remote`
-之前备份处于暂停状态。
+首次启动且无配置时，插件写入一份带说明的模板到 `<home>/sync-plugin/config.json`，并记录一条警告：在设置 `remote` 之前备份处于暂停状态。
 
-完成配置有两种方式：
+设置远端有两种方式。
 
-**用命令**——无需重启：
+命令方式（无需重启）：
 
 ```text
 /dsh-sync setup git@github.com:you/dsh-backup.git
 ```
 
-**手动编辑**——填写远端后重启：
+编辑配置文件后重启：
 
 ```json
 {
@@ -133,71 +128,62 @@ dsh plugin --profile desktop add link:/本目录的绝对路径/dsh-auto-sync
 }
 ```
 
-下次启动时，插件会初始化仓库、为每条启用的备份线创建分支和工作区副本，然后开始备份。
+下次启动时，插件初始化仓库、为每条启用的备份线创建分支与工作区副本，并开始备份。
 
 ---
 
 ## `/dsh-sync` 命令
 
-只要 profile 提供 `commands` 服务就有这个命令（Web 与桌面 profile 有，headless 与 ACP profile 没有）。
+需要 profile 提供 `commands` 服务（Web 与桌面 profile 提供，headless 与 ACP profile 不提供）。
 
-| 命令 | 效果 |
+| 命令 | 行为 |
 | --- | --- |
-| `/dsh-sync` | 报告远端、各备份线，以及各自上次成功时间 |
+| `/dsh-sync` | 报告远端、各备份线及上次成功时间 |
 | `/dsh-sync setup [地址]` | 设置远端并执行首次初始化 |
-| `/dsh-sync remote <地址>` | 只修改远端，不动分支 |
+| `/dsh-sync remote <地址>` | 仅修改远端，不改动分支 |
 | `/dsh-sync lines` | 列出备份线及其分支 |
-| `/dsh-sync workspace <路径>` | 启用项目线，指定要备份的项目目录 |
+| `/dsh-sync workspace <路径>` | 启用项目线并指定目录 |
 | `/dsh-sync workspace off` | 关闭项目线 |
-| `/dsh-sync run` | 立刻安排一次快照 |
+| `/dsh-sync run` | 立即安排一次快照 |
 | `/dsh-sync doctor` | 诊断 git、仓库、分支与工作区副本 |
 
-通过命令做的每一次修改都会写回配置文件，因此结果是可见、可 diff 的，而不是只存在于界面状态里。
+命令产生的修改均写回配置文件，结果可 diff。
 
 ### 界面语言
 
-命令输出与首次引导支持中文和英文，按以下顺序决定：
-
-1. 配置里的 `locale`（`zh` 或 `en`）；
-2. 环境变量 `DSH_AUTO_SYNC_LOCALE`；
-3. DSH 自身的界面语言（宿主提供时）；
-4. 默认 `en`。
-
-日志信息始终是英文，这样贴到 issue 里的报错谁都能读。
+命令输出与首次引导支持中文与英文，取值顺序为：配置中的 `locale` → 环境变量 `DSH_AUTO_SYNC_LOCALE` → DSH 界面语言（宿主提供时）→ 默认 `en`。日志信息固定为英文，便于在 issue 中引用。
 
 ---
 
 ## 设置页
 
-在桌面版或 Web 版里，`设置 → 插件` 会多出一个**自动备份**页签，和斜杠命令读写同一份配置文件：
+桌面版与 Web 版的「设置 → 插件」提供**自动备份**页签，与斜杠命令读写同一份配置文件：
 
-- 填写或修改远端仓库地址（保存后，首次配置会立刻执行初始化，不用重启）
-- 查看三条备份线的分支、启用状态、上次成功时间与最后一次错误
-- 指定要同时备份的项目目录，清空即关闭项目线
-- 一键手动快照
+- 填写或修改远端地址；首次配置保存后立即执行初始化，无需重启；
+- 查看各备份线的分支、启用状态、上次成功时间与最后一次错误；
+- 指定同时备份的项目目录，清空即关闭项目线；
+- 手动触发一次快照。
 
-实现上分两半：
+实现分为两部分：
 
-| 半边 | 文件 | 职责 |
+| 部分 | 文件 | 职责 |
 | --- | --- | --- |
-| Host | `lib/api.mjs` | 在 `webServer` 上注册三个同名路由，校验并落盘 |
+| Host | `lib/api.mjs` | 在 `webServer` 上注册路由并校验、持久化 |
 | Client | `lib/client.js` | 浏览器脚本，注册 `settings.plugins.tab` 页签 |
 
-客户端是**手写的普通浏览器脚本**，通过 `window.__ModuleLoader__.load` 加载，直接使用宿主提供的 React——**不需要任何构建步骤**，改完刷新即可看到效果。
+客户端为无构建步骤的原生浏览器脚本，经 `window.__ModuleLoader__.load` 加载并复用宿主提供的 React。
 
 ### 接口
 
 | 路由 | 方法 | 作用 |
 | --- | --- | --- |
-| `/api/dsh-auto-sync/status` | GET | 返回配置、三条线状态、git 可用性 |
-| `/api/dsh-auto-sync/config` | POST | 校验并保存远端、语言、备份线间隔、项目目录 |
-| `/api/dsh-auto-sync/snapshot` | POST | 立刻安排一次快照（未配置远端时返回 409） |
+| `/api/dsh-auto-sync/status` | GET | 配置、各线状态、git 可用性 |
+| `/api/dsh-auto-sync/config` | POST | 校验并保存远端、语言、间隔、项目目录 |
+| `/api/dsh-auto-sync/snapshot` | POST | 立即安排快照（未配置远端时返回 409） |
 
-接口只接受页面会用到的字段，其余键原样保留，因此手写在配置文件里的自定义内容不会被界面弄丢。
+接口只处理页面使用的字段，其余键原样保留。写操作要求 `Origin` 与 `Host` 同源，不一致返回 403。
 
-**跨站防护**：写操作要求 `Origin` 头与 `Host` 同源，不一致直接 403。这样别的网站无法借用户浏览器触发备份写入。
-
-没有 `webServer` 的 profile（headless、CLI）不会注册这些路由，页面自然也不存在——插件本身照常工作。
+不提供 `webServer` 的 profile 不注册这些路由，插件其余功能不受影响。
 
 ---
 
@@ -209,14 +195,14 @@ dsh plugin --profile desktop add link:/本目录的绝对路径/dsh-auto-sync
 
 | 键 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `remote` | `string` | `""` | 备份远端地址。**必填。** SSH 与 HTTPS 均可。 |
-| `remoteName` | `string` | `"origin"` | 当 `origin` 已指向其他仓库时使用的远端名。 |
-| `worktree` | `string` | `<home>-backup` | 各备份线工作区副本的父目录。必须**位于 home 之外**。 |
-| `locale` | `string` | `"zh"` | 命令与引导文案语言：`zh` 或 `en`。 |
-| `exclude` | `string[]` | 见下文 | 追加到 home `.gitignore` 的额外忽略规则。 |
-| `userName` | `string` | `"dsh-auto-sync"` | 提交者名称，仅在 git 没有配置身份时使用。 |
-| `userEmail` | `string` | `"dsh-auto-sync@localhost"` | 提交者邮箱，同上。 |
-| `home` | `string` | `$DSH_HOME` 或 `~/.dsh` | 覆盖 home 目录。显式 `--home` 优先于环境变量。 |
+| `remote` | `string` | `""` | 备份远端地址，必填。支持 SSH 与 HTTPS。 |
+| `remoteName` | `string` | `"origin"` | `origin` 已指向其他仓库时使用的远端名。 |
+| `worktree` | `string` | `<home>-backup` | 各备份线工作区副本的父目录，须位于 home 之外。 |
+| `locale` | `string` | `"zh"` | 命令与引导语言：`zh` 或 `en`。 |
+| `exclude` | `string[]` | 见下文 | 追加到 home `.gitignore` 的忽略规则。 |
+| `userName` | `string` | `"dsh-auto-sync"` | git 未配置身份时使用的提交者名称。 |
+| `userEmail` | `string` | `"dsh-auto-sync@localhost"` | 同上，邮箱。 |
+| `home` | `string` | `$DSH_HOME` 或 `~/.dsh` | 覆盖 home 目录；显式 `--home` 优先于环境变量。 |
 
 默认忽略规则：
 
@@ -233,32 +219,32 @@ memory/memory.db-wal
 
 ### 备份线键
 
-每条线都接受 `enabled` 和 `branch`，此外还有：
+每条线均接受 `enabled` 与 `branch`。
 
 **`lines.hot`**
 
 | 键 | 默认值 | 说明 |
 | --- | --- | --- |
-| `paths` | `[".sync-status.json"]` | 每轮对话后提交的文件，相对 home。解析到 home 之外的路径会被拒绝。 |
-| `debounceMs` | `30000` | 最后一个对话轮结束后的静默期。 |
-| `intervalMs` | `900000` | 无条件刷新间隔，让长时间运行的工具调用也能落盘。 |
+| `paths` | `[".sync-status.json"]` | 每轮对话后提交的文件，相对 home；解析到 home 之外的路径会被拒绝。 |
+| `debounceMs` | `30000` | 最后一轮对话结束后的静默期。 |
+| `intervalMs` | `900000` | 无条件刷新间隔，保证长时间工具调用期间状态仍能落盘。 |
 
 **`lines.snapshot`**
 
 | 键 | 默认值 | 说明 |
 | --- | --- | --- |
 | `intervalMs` | `86400000` | 完整快照间隔。 |
-| `profile` | `"desktop"` | 纳入哪份 profile 的依赖树。 |
-| `includeNodeModules` | `true` | 尽管 home 层排除了 `node_modules`，仍在快照中重新纳入该 profile 的依赖。 |
+| `profile` | `"desktop"` | 纳入依赖树的 profile。 |
+| `includeNodeModules` | `true` | 在快照中重新纳入该 profile 的 `node_modules`。 |
 | `files` | 清单文件列表 | 与依赖树一同镜像的 profile 文件。 |
 
 **`lines.workspace`**
 
 | 键 | 默认值 | 说明 |
 | --- | --- | --- |
-| `enabled` | `false` | 在指定 `source` 之前，这条线保持空闲。 |
-| `source` | `""` | 要镜像的项目目录的绝对路径。 |
-| `exclude` | `[".git", "node_modules", "dist", "build", "target", ".cache"]` | 递归时按名称跳过的目录/文件。一旦设置便完全取代默认值。 |
+| `enabled` | `false` | 未设置 `source` 时该线保持空闲。 |
+| `source` | `""` | 要镜像的项目目录绝对路径。 |
+| `exclude` | `[".git", "node_modules", "dist", "build", "target", ".cache"]` | 递归时跳过的目录或文件；设置后完全取代默认值。 |
 
 ### 示例
 
@@ -292,34 +278,34 @@ memory/memory.db-wal
 
 ### `hot` → `dsh-hot`
 
-小而频繁变化的状态。文件被复制进该线的工作区副本，提交并推送。默认节奏是对话轮结束后 30 秒，并有 15 分钟下限，保证长时间的工具序列期间状态也能落盘。
+频繁变化的小文件。文件复制进该线的工作区副本后提交并推送。默认在对话轮结束后 30 秒触发，并有 15 分钟下限，保证长时间工具调用期间状态仍能落盘。
 
 ### `snapshot` → `dsh-snapshot`
 
-home 的完整镜像，外加所配置 profile 的依赖清单与已安装依赖树。这条线才是让一台机器可恢复的关键。`link:` 依赖按清单条目记录，克隆后用包管理器恢复；已发布的依赖则直接固化进分支。
+home 的完整镜像，附带所配置 profile 的依赖清单与依赖树。`link:` 依赖按清单条目记录，克隆后由包管理器恢复；已发布依赖固化进分支。
 
-每日运行一次、关闭时运行一次，并在启动后发现上次快照早于间隔时补跑一次——否则反复重启会把倒计时一直重置，永远到不了这条线。
+运行时机：每日一次、退出时一次，以及启动时发现上次快照早于间隔的补跑。重复重启会重置倒计时，补跑避免了该问题。
 
 ### `workspace` → `dsh-workspace`
 
-镜像一个项目目录，让正在写的代码和描述它的状态一起被版本化。默认关闭。构建产物与依赖缓存会被排除；排除列表可配置。
+镜像指定的项目目录，使代码与其描述状态一同版本化。默认关闭。构建产物与依赖缓存被排除，排除列表可配置。
 
-### `release` → GitHub Release 附件
+### `release` → GitHub Release 资产
 
-**全量备份的另一种形态**：把整个 home 打成 tar.gz，作为 release 附件发布。
+完整备份的另一种形态：将 home 打包为 `tar.gz` 并作为 release 资产发布。
 
-为什么要两种全量备份并存：
+两种完整备份并存的原因：
 
-| | `snapshot`（分支） | `release`（附件） |
+| | `snapshot`（分支） | `release`（资产） |
 | --- | --- | --- |
-| 存储 | 每个版本都算进 git 历史 | 每个版本一个独立归档 |
-| 体积代价 | 上万文件 × 每次提交 | 一份压缩包 |
-| 恢复 | `git checkout` | 下载解压，无需本插件 |
-| 保留多份 | 历史无限增长 | 保留 N 份，自动清理 |
+| 存储 | 每个版本进入 git 历史 | 每个版本一个压缩包 |
+| 成本 | 每次提交涉及数万文件 | 单个压缩文件 |
+| 恢复 | `git checkout` | 下载解压，无需插件 |
+| 长期保留 | 历史持续增长 | 保留最近 N 份 |
 
-所以：**日常增量用 `snapshot`，长期归档与灾难恢复用 `release`。**
+日常增量使用 `snapshot`，长期归档与灾难恢复使用 `release`。
 
-实测一份 3.4 GB 的 home（不含依赖）压出来约 **369 MiB**，单文件即可上传。
+以 3.4 GB 的 home 实测（排除依赖），归档体积约 369 MiB。
 
 ```json
 "release": {
@@ -334,20 +320,20 @@ home 的完整镜像，外加所配置 profile 的依赖清单与已安装依赖
 }
 ```
 
-- `repo` 留空则从 git 远端自动推导 `owner/name`，不必重复填。
-- 超过 `partSizeBytes` 自动分卷为 `.part000`、`.part001`…，并附带带 sha256 的 `manifest.json`。
-- `keep` 控制保留几份，超出的按标签名（含时间戳）从旧到新删除；**只删本线自己创建的标签前缀**。
-- `.credentials.yaml` 默认排除。`includeSecrets: true` 会把它打进附件——公开仓库下等于泄露密钥，慎用。
+- `repo` 为空时由 git 远端推导为 `owner/name`。
+- 超过 `partSizeBytes` 时分割为 `.part000`、`.part001` 等，并生成记录各部分 sha256 的 `manifest.json`。
+- `keep` 限制保留数量；超出时优先删除较早的 tag，且仅考虑带本线 `tagPrefix` 的 tag。
+- `.credentials.yaml` 默认排除；`includeSecrets: true` 会将其打入归档，在公开仓库上等同于泄露密钥。
 
-首次使用先试跑，不产生任何上传：
+上传前可先预演：
 
 ```sh
 node release-backup.mjs --dry-run
 ```
 
-它会告诉你归档多大、分几卷、将发到哪个仓库。
+输出归档体积、分片数与目标仓库。
 
-**传输方式**：优先使用 `gh`（GitHub CLI），没有 `gh` 时回退到 REST API + token。这一点不是随便选的——在装了 TLS 中间人的机器上（企业代理、改写 hosts 的加速器），Node 的 `fetch` 会以 `UNABLE_TO_VERIFY_LEAF_SIGNATURE` 失败，而 `gh` 用自己的信任链正常工作。REST 路径下 token 取自 `DSH_AUTO_SYNC_GITHUB_TOKEN`、`GITHUB_TOKEN`，或 `gh auth token`。
+传输在 GitHub CLI 存在时使用 `gh`，否则使用 REST API 加 token。该顺序是必要的：在 TLS 中间人代理环境下，Node 的 `fetch` 会因 `UNABLE_TO_VERIFY_LEAF_SIGNATURE` 失败，而 `gh` 使用独立的信任链。REST 路径的 token 依次取自 `DSH_AUTO_SYNC_GITHUB_TOKEN`、`GITHUB_TOKEN`、`gh auth token`。
 
 ---
 
@@ -356,7 +342,7 @@ node release-backup.mjs --dry-run
 恢复整个 home：
 
 ```sh
-git clone <你的远端> ~/.dsh
+git clone <远端地址> ~/.dsh
 cd ~/.dsh
 git checkout dsh-snapshot
 dsh plugin --profile desktop install
@@ -371,24 +357,24 @@ git show dsh-snapshot:sessions/2026-01-01/....jsonl > restored.jsonl
 恢复项目：
 
 ```sh
-git clone --branch dsh-workspace <你的远端> project
+git clone --branch dsh-workspace <远端地址> project
 ```
 
-`git log dsh-snapshot -- <路径>` 能给出任意单个文件的修订历史，这让备份不仅能当灾备，也能当恢复工具用。
+`git log dsh-snapshot -- <路径>` 给出单个文件的修订历史。
 
 ---
 
 ## 安全模型
 
-**默认排除密钥。** 首次运行时，插件会把 `.credentials.yaml` 及上文列出的其他规则写进 home 的 `.gitignore`。`.credentials.yaml` 保存服务商 API Key，绝不能推送上去。
+**默认排除凭据。** 首次运行时插件把 `.credentials.yaml` 及以上规则写入 home 的 `.gitignore`。该文件保存服务商 API Key，不应推送。
 
-**已有仓库是接管，不是覆盖。** 如果 home 已经是带远端的 git 仓库，它的历史和远端配置都会原样保留。插件只添加分支和工作区副本。它从不重写、变基或强推已有历史，也从不改动已指向别处的远端。
+**接管而非覆盖已有仓库。** home 已是带远端的 git 仓库时，其历史与远端配置原样保留；插件只新增分支与工作区副本，不重写、变基或强推历史，也不修改已指向其他位置的远端。
 
-**从不强推。** 推送被拒绝时会先合并远端顶端再重试一次，冲突以本地快照为准。从插件视角看，历史只增不改。
+**从不强推。** 推送被拒绝时合并远端顶端并重试一次，冲突以本地快照为准。历史只增不改。
 
-**配置无法外泄文件。** `lines.hot.paths` 会相对 home 解析，超出 home 即拒绝，所以一份写错的配置无法把备份线变成任意文件复制器。
+**配置无法导出 home 之外的文件。** `lines.hot.paths` 相对 home 解析，越界即拒绝。
 
-**插件对会话是失败开放。** 任何错误都不会抛进会话事件链。备份失败会被记录并上报，对话照常进行；失败通过状态文件和日志暴露，而不是通过中断聊天。
+**对会话失败开放。** 备份错误不会进入会话事件链；失败通过状态文件与日志上报，对话照常进行。
 
 ---
 
@@ -396,22 +382,22 @@ git clone --branch dsh-workspace <你的远端> project
 
 ### 并发
 
-每条线独占工作区副本与 index。快照脚本会获取锁文件，因此重叠触发（定时器、启动补跑、关闭钩子）会串行执行，而不是破坏进行中的提交。超过一小时的锁视为已废弃。
+每条线独占工作区副本与 index。快照脚本获取锁文件，重叠触发（定时器、启动补跑、退出钩子）串行执行。超过一小时的锁视为废弃。
 
 ### 失败处理
 
 | 情况 | 行为 |
 | --- | --- |
 | `git` 缺失 | 启动检查报告；备份暂停 |
-| `remote` 未设置 | 写入模板；备份暂停并明确告警 |
-| 推送被拒绝 | 合并远端顶端后重试一次；从不强推 |
-| 工作区副本缺失 | 报告；重启 DSH 即可重建 |
-| 工作区副本检出的是别的分支 | 拒绝接管，避免两个分支共用一份快照 |
+| `remote` 未设置 | 写入模板；备份暂停并告警 |
+| 推送被拒绝 | 合并远端顶端后重试一次；不强推 |
+| 工作区副本缺失 | 报告；重启 DSH 后重建 |
+| 工作区副本检出了其他分支 | 拒绝接管，避免两个分支共用一份快照 |
 | 提交身份缺失 | 回退到配置的 `userName` / `userEmail` |
 
 ### 可观测性
 
-`<home>/sync-plugin/status.json` 按线记录上次成功时间与最后一次错误信息：
+`<home>/sync-plugin/status.json` 按线记录上次成功时间与最后一次错误：
 
 ```json
 {
@@ -425,47 +411,43 @@ git clone --branch dsh-workspace <你的远端> project
 }
 ```
 
-超过 48 小时未成功的备份线会在启动时报告到 DSH 日志。
+超过 48 小时未成功的备份线在启动时报告到 DSH 日志。
 
 ---
 
 ## 排错
 
-**备份暂停：`remote` 为空。**
-在 `<home>/sync-plugin/config.json` 里设置 `remote`，或运行 `/dsh-sync setup <地址>`。
+**备份暂停，`remote` 为空。**
+在 `<home>/sync-plugin/config.json` 中设置 `remote` 后重启 DSH，或执行 `/dsh-sync setup <地址>`。
 
-**推送失败并提示 `could not read Username`。**
-插件在没有终端的环境下运行，git 无法弹出提示。请配置无口令的 SSH key，或让 credential helper 已保存 token。
+**推送报 `could not read Username`。**
+插件运行环境没有终端，git 无法交互输入。配置免口令 SSH key，或预先保存凭据到 credential helper。
 
 **出现 `index.lock: File exists`。**
-这是同一 index 上并发运行的结果，本插件在设计上已经避免。如果出现，说明上一个 DSH 进程没有正常退出：删除对应工作区副本 `.git` 目录下的陈旧锁文件即可。
+本插件按设计避免同一 index 上的并发。出现该错误说明上一个 DSH 进程未正常退出，删除对应工作区副本 `.git` 目录下的陈旧锁文件。
 
-**快照线从不运行。**
-确认 `lines.snapshot.enabled`，并查看 `status.json`。最常见的原因是 `PATH` 里没有 `git`，启动时会报告。
+**快照线未运行。**
+确认 `lines.snapshot.enabled`，检查 `status.json`。常见原因为 `PATH` 中缺少 `git`，启动时会报告。
 
 **工作区副本因检出其他分支被拒绝。**
-插件不会接管检出了别的分支的目录。把 `worktree` 指向别处，或删除该陈旧目录。
+插件不会接管检出了其他分支的目录。将 `worktree` 指向其他位置，或删除该陈旧目录。
 
-**中文命令输出没有生效。**
-检查配置里的 `locale` 是否为 `"zh"`，或设置环境变量 `DSH_AUTO_SYNC_LOCALE=zh`。
+**中文命令输出未生效。**
+确认 `locale` 为 `"zh"`，或设置 `DSH_AUTO_SYNC_LOCALE=zh`。
 
 ---
 
 ## 开发
 
-仓库本身没有任何运行时依赖。测试会在系统临时目录下建立一次性仓库，并对最终推送到远端的内容做断言，包括反向用例：密钥、日志、构建产物绝不能出现在任何分支上。
+仓库无运行时依赖。测试在系统临时目录中创建一次性仓库，并对推送到远端的内容断言，包含反向用例：密钥、日志与构建产物不得出现在任何分支。
 
 ```sh
-node tests/e2e.mjs           # 完整流程：初始化、热提交、快照、推送
-node tests/verify-remote.mjs # 对远端实际内容做断言
+node tests/e2e.mjs           # 初始化、热提交、快照、推送
+node tests/verify-remote.mjs # 对远端实际内容断言
 node tests/edge.mjs          # 项目线、接管已有仓库、未配置启动、路径逃逸
-node tests/onboard.mjs       # 远端校验、引导消息、/dsh-sync 命令、中英文一致性
-node tests/api.mjs           # 设置页接口：校验、写盘、跨站拦截、幂等注册
-node tests/client.mjs        # 客户端脚本：模块工厂、slot 注册、样式注入
-node tests/registration.mjs  # Cordis inject 契约：服务声明与缺失服务时的挂载
-node tests/archive.mjs       # 归档与分卷：排除密钥、依赖开关、分卷重组、清单
-node tests/release-api.mjs   # 发布接口：仓库解析、标签、幂等创建、清理顺序
-node tests/release-gh.mjs    # GitHub CLI 传输：命令行、失败信息、REST 回退
+node tests/onboard.mjs       # 远端校验、引导消息、命令、中英文一致性
+node tests/api.mjs           # 设置页接口：校验、持久化、跨站拦截
+node tests/client.mjs        # 客户端脚本：模块工厂、页签注册
 ```
 
 | 路径 | 职责 |
@@ -473,15 +455,13 @@ node tests/release-gh.mjs    # GitHub CLI 传输：命令行、失败信息、RE
 | `index.js` | 插件入口：调度、热备份线、生命周期 |
 | `cold-sync.mjs` | 分离进程中的快照线 |
 | `workspace-sync.mjs` | 项目镜像线 |
-| `release-backup.mjs` | 发布包线：打包、分卷、上传、清理 |
+| `release-backup.mjs` | Release 归档线 |
 | `lib/config.mjs` | 默认值、分层、首次运行模板 |
 | `lib/setup.mjs` | 仓库初始化、接管、忽略规则、工作区副本 |
 | `lib/onboard.mjs` | 首次引导与 `/dsh-sync` 命令 |
-| `lib/i18n.mjs` | 中英双语文案 |
-| `lib/api.mjs` | 设置页的 Host 端路由 |
-| `lib/client.js` | 设置页的浏览器端 |
-| `lib/archive.mjs` | 归档与分卷 |
-| `lib/release.mjs` | 发布：gh 与 REST 两种传输 |
+| `lib/i18n.mjs` | 中英文案 |
+| `lib/api.mjs` | 设置页 Host 端路由 |
+| `lib/client.js` | 设置页浏览器端 |
 | `lib/git.mjs` | git 封装 |
 | `lib/copy.mjs` | 跨平台目录镜像 |
 | `lib/status.mjs` | 状态上报 |
